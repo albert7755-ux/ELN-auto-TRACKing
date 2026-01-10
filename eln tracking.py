@@ -1,79 +1,125 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-import requests
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 # --- 設定網頁 ---
-st.set_page_config(page_title="ELN 自動戰情室 (Line版)", layout="wide")
+st.set_page_config(page_title="ELN 自動戰情室 (Email版)", layout="wide")
 
-# --- 側邊欄：設定 Line Token ---
+# --- 側邊欄：設定 Email 寄件資訊 ---
 with st.sidebar:
-    st.header("💬 Line 通知設定")
-    st.markdown("請輸入您的 Line Notify 權杖")
+    st.header("📧 Email 設定中心")
+    st.markdown("請輸入您的 Gmail 寄件資訊")
     
-    # 讓使用者輸入 Token (密碼形式)
-    line_token = st.text_input("Line Token", type="password", placeholder="貼上剛剛申請的那串亂碼...")
+    sender_email = st.text_input("寄件人 Gmail", placeholder="example@gmail.com")
+    sender_password = st.text_input("應用程式密碼", type="password", placeholder="16位數密碼", help="請至 Google 帳戶 > 安全性 > 應用程式密碼 申請")
     
-    st.markdown("---")
-    st.info("💡 **小撇步：**\n1. 去 [Line Notify](https://notify-bot.line.me/) 申請權杖\n2. 若要發到群組，記得邀請 'Line Notify' 機器人入群")
+    st.info("💡 程式會自動偵測 Excel 中的「Email」欄位來發信。")
 
-# --- 函數：發送 Line 通知 ---
-def send_line_notify(token, message):
-    if not token:
-        st.warning("⚠️ 請先在左側輸入 Line Token")
+# --- 函數：發送 Email ---
+def send_email(sender, password, receiver, subject, body):
+    if not sender or not password or not receiver:
+        st.warning("⚠️ 寄件資料不完整")
         return False
-    
-    url = "https://notify-api.line.me/api/notify"
-    headers = {"Authorization": "Bearer " + token}
-    data = {"message": message}
-    
+
+    msg = MIMEMultipart()
+    msg['From'] = sender
+    msg['To'] = receiver
+    msg['Subject'] = subject
+    msg.attach(MIMEText(body, 'plain'))
+
     try:
-        response = requests.post(url, headers=headers, data=data)
-        if response.status_code == 200:
-            st.toast("✅ Line 通知已發送！", icon="🚀")
-            return True
-        else:
-            st.error(f"❌ 發送失敗，錯誤碼：{response.status_code}")
-            return False
+        server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
+        server.login(sender, password)
+        server.send_message(msg)
+        server.quit()
+        st.toast(f"✅ 已寄信給 {receiver}", icon="📩")
+        return True
     except Exception as e:
-        st.error(f"連線錯誤：{e}")
+        st.error(f"❌ 發送失敗：{e}")
         return False
+
+# --- 智慧搜尋欄位函數 ---
+def find_col_index(columns, keywords):
+    for idx, col_name in enumerate(columns):
+        col_str = str(col_name).strip().lower()
+        if any(k in col_str for k in keywords):
+            return idx
+    return None
 
 # --- 主畫面 ---
 st.title("📊 ELN 結構型商品 - 自動監控戰情室")
-st.markdown("### 💬 Line 通知專用版")
+st.caption("🚀 支援 Excel 自動匯入 Email 名單 (請在 Excel 新增 'Email' 欄位)")
 
-uploaded_file = st.file_uploader("請上傳 Excel 檔案 (工作表1)", type=['xlsx'])
+uploaded_file = st.file_uploader("請上傳 Excel 檔案 (工作表1格式)", type=['xlsx'])
 
 if uploaded_file is not None:
     try:
-        # 1. 讀取資料 (跳過第一列標題)
-        # ✅ 修正重點：加上 engine='openpyxl' 並且確保縮排正確
-        df = pd.read_excel(uploaded_file, sheet_name=0, header=1, engine='openpyxl')
+        # 1. 讀取資料 (使用 openpyxl 引擎)
+        try:
+            df = pd.read_excel(uploaded_file, sheet_name=0, header=0, engine='openpyxl')
+        except:
+            df = pd.read_excel(uploaded_file, sheet_name=0, header=0)
 
-        # 2. 建立乾淨的 DataFrame (對應你的工作表1格式)
+        cols = df.columns.tolist()
+        
+        # --- 2. 智慧定位欄位 ---
+        id_idx = find_col_index(cols, ["債券", "代號", "id"]) or 0
+        ko_idx = find_col_index(cols, ["ko", "%"]) or find_col_index(cols, ["ko", "價格"])
+        ki_idx = find_col_index(cols, ["ki", "%"]) or find_col_index(cols, ["ki", "價格"])
+        t1_idx = find_col_index(cols, ["標的1"])
+        
+        # 尋找 Email 欄位 (支援多種寫法)
+        email_idx = find_col_index(cols, ["email", "信箱", "郵件", "e-mail"])
+        # 尋找 姓名/理專 欄位 (選填)
+        name_idx = find_col_index(cols, ["理專", "姓名", "客戶", "name"])
+
+        if t1_idx is None or ko_idx is None:
+            st.error("❌ 無法辨識關鍵欄位，請確認 Excel 標題包含「債券代號」、「標的1」、「KO」。")
+            st.stop()
+
+        # --- 3. 建立資料表 ---
         clean_df = pd.DataFrame()
-        clean_df['ID'] = df.iloc[:, 0]  # 債券代號
+        clean_df['ID'] = df.iloc[:, id_idx]
         
-        # 抓取 5 檔標的
-        clean_df['T1_Code'] = df.iloc[:, 7]
-        clean_df['T1_Strike'] = df.iloc[:, 8]
-        clean_df['T2_Code'] = df.iloc[:, 9]
-        clean_df['T2_Strike'] = df.iloc[:, 10]
-        clean_df['T3_Code'] = df.iloc[:, 11]
-        clean_df['T3_Strike'] = df.iloc[:, 12]
-        clean_df['T4_Code'] = df.iloc[:, 13]
-        clean_df['T4_Strike'] = df.iloc[:, 14]
-        clean_df['T5_Code'] = df.iloc[:, 15]
-        clean_df['T5_Strike'] = df.iloc[:, 16]
+        # 處理 Email
+        if email_idx is not None:
+            clean_df['Email'] = df.iloc[:, email_idx]
+        else:
+            clean_df['Email'] = "" # 沒找到欄位就留白
+            
+        # 處理 姓名
+        if name_idx is not None:
+            clean_df['Name'] = df.iloc[:, name_idx]
+        else:
+            clean_df['Name'] = "客戶"
+
+        # 抓取數值
+        clean_df['KO_Pct'] = df.iloc[:, ko_idx]
+        clean_df['KI_Pct'] = df.iloc[:, ki_idx] if ki_idx else 60.0
         
-        clean_df['KO_Pct'] = df.iloc[:, 20]
-        clean_df['KI_Pct'] = df.iloc[:, 22]
+        # 抓取標的 1~5
+        clean_df['T1_Code'] = df.iloc[:, t1_idx]
+        clean_df['T1_Strike'] = df.iloc[:, t1_idx + 1] # 進場價通常在代碼右邊
         
+        # 簡易迴圈抓 T2~T5 (智慧判斷)
+        for i in range(2, 6):
+            tx_idx = find_col_index(cols, [f"標的{i}"])
+            if tx_idx:
+                clean_df[f'T{i}_Code'] = df.iloc[:, tx_idx]
+                clean_df[f'T{i}_Strike'] = df.iloc[:, tx_idx + 1]
+            else:
+                # 找不到就用推算的 (假設每2格一組)
+                offset = (i-1) * 2
+                clean_df[f'T{i}_Code'] = df.iloc[:, t1_idx + offset]
+                clean_df[f'T{i}_Strike'] = df.iloc[:, t1_idx + offset + 1]
+
         clean_df = clean_df.dropna(subset=['ID'])
         
-        # 3. 抓取美股現價
-        st.info("連線美股報價中... 請稍候 ☕")
+        # --- 4. 抓股價 ---
+        st.info("連線美股報價中... ☕")
         all_tickers = []
         for i in range(1, 6):
             tickers = clean_df[f'T{i}_Code'].dropna().astype(str).unique().tolist()
@@ -91,14 +137,17 @@ if uploaded_file is not None:
             st.error("無法抓取股價")
             st.stop()
 
-        # 4. 核心計算
+        # --- 5. 計算結果 ---
         results = []
         for index, row in clean_df.iterrows():
             row_output = {
                 "債券代號": row['ID'],
+                "收件人": row['Name'],
+                "Email": str(row['Email']).strip() if pd.notna(row['Email']) else "",
                 "狀態": "觀察中",
                 "最差表現": 0.0,
-                "msg_content": ""
+                "msg_subject": "",
+                "msg_body": ""
             }
             
             try:
@@ -111,7 +160,7 @@ if uploaded_file is not None:
             perfs = []
             is_all_ko = True
             hit_ki = False
-            details_text = "" # 用來組裝 Line 訊息
+            details_text = ""
             
             for i in range(1, 6):
                 code = str(row[f'T{i}_Code']).strip()
@@ -132,20 +181,15 @@ if uploaded_file is not None:
                     p = curr / initial
                     perfs.append(p)
                     
-                    icon = "✅" if p >= ko_threshold else "⚠️" if p < ki_threshold else ""
                     if p < ko_threshold: is_all_ko = False
                     if p < ki_threshold: hit_ki = True
                     
                     row_output[f"標的{i}"] = code
                     row_output[f"現價{i}"] = round(curr, 2)
-                    row_output[f"表現{i}"] = f"{round(p*100, 2)}% {icon}"
-                    
-                    # Line 訊息要簡潔
-                    details_text += f"{code}: {round(p*100, 1)}%\n"
-                    
+                    row_output[f"表現{i}"] = f"{round(p*100, 2)}%"
+                    details_text += f"- {code}: 現價 {round(curr, 2)} / 進場 {initial} ({round(p*100, 2)}%)\n"
                 except:
-                    row_output[f"表現{i}"] = "Error"
-                    is_all_ko = False
+                    pass
 
             if perfs:
                 worst = min(perfs)
@@ -157,41 +201,60 @@ if uploaded_file is not None:
                 
                 row_output["狀態"] = status_msg
                 
-                # 組裝給 Line 的文字 (換行符號是 \n)
-                row_output["msg_content"] = (
-                    f"\n【ELN快訊】{row['ID']}\n"
+                # 準備信件內容
+                row_output["msg_subject"] = f"【ELN通知】{row['ID']} 最新狀態：{status_msg}"
+                row_output["msg_body"] = (
+                    f"Hi {row['Name']}：\n\n"
+                    f"您關注的商品 {row['ID']} 今日狀態更新：\n"
                     f"狀態：{status_msg}\n"
                     f"最差表現：{round(worst*100, 2)}%\n"
-                    f"----------------\n"
-                    f"{details_text}"
+                    f"--------------------------------\n"
+                    f"{details_text}\n"
+                    f"(本郵件由系統自動發送)"
                 )
 
             results.append(row_output)
 
-        # 5. 顯示結果
+        # --- 6. 顯示結果 ---
         final_df = pd.DataFrame(results)
         
-        st.subheader("📋 監控列表")
-        st.caption("勾選您想通知的商品，按下按鈕即可發送到 Line")
-
-        # 使用 Streamlit 的表格呈現
-        st.dataframe(
-            final_df[['債券代號', '狀態', '最差表現'] + [c for c in final_df.columns if '標的' in c or '表現' in c]], 
-            use_container_width=True
+        st.subheader("📋 監控與發信列表")
+        st.caption("程式會自動抓取 Excel 中的 Email，您也可以在下方直接修改後發送。")
+        
+        # 讓使用者可以臨時修改 Email (使用 Data Editor)
+        edited_df = st.data_editor(
+            final_df[['債券代號', '收件人', 'Email', '狀態', '最差表現']],
+            column_config={
+                "Email": st.column_config.TextColumn("Email (可編輯)", help="填入收信者的 Email"),
+            },
+            use_container_width=True,
+            num_rows="fixed"
         )
         
-        st.markdown("### 📢 發送通知區")
+        st.markdown("### 📢 一鍵發信")
         
-        # 只列出有 KO 或 HIT 的商品建議發送
+        # 找出建議通知的項目
         for idx, row in final_df.iterrows():
             if "KO" in row['狀態'] or "HIT" in row['狀態']:
+                # 取得在上方表格可能被修改過的 Email
+                current_email = edited_df.iloc[idx]['Email']
+                current_name = edited_df.iloc[idx]['收件人']
                 
                 col1, col2 = st.columns([4, 1])
                 with col1:
-                    st.text(f"建議發送：{row['債券代號']} - {row['狀態']}")
+                    st.text(f"通知 {current_name} ({current_email}) - {row['狀態']}")
                 with col2:
-                    if st.button(f"💬 發 Line", key=f"line_{idx}"):
-                        send_line_notify(line_token, row['msg_content'])
+                    if sender_email and sender_password and current_email:
+                        if st.button(f"📧 發信", key=f"mail_{idx}"):
+                            send_email(
+                                sender_email, 
+                                sender_password, 
+                                current_email, 
+                                row['msg_subject'], 
+                                row['msg_body']
+                            )
+                    else:
+                        st.button(f"🚫 資料不全", key=f"dis_{idx}", disabled=True, help="請確認側邊欄已填寫寄件資訊，且該筆資料有 Email")
 
     except Exception as e:
         st.error(f"發生錯誤：{e}")
