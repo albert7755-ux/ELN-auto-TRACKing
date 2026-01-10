@@ -48,7 +48,8 @@ uploaded_file = st.file_uploader("請上傳 Excel 檔案 (工作表1)", type=['x
 if uploaded_file is not None:
     try:
         # 1. 讀取資料 (跳過第一列標題)
-        df = pd.read_excel(uploaded_file, sheet_name=0, header=1)
+    
+df = pd.read_excel(uploaded_file, sheet_name=0, header=1, engine='openpyxl')
 
         # 2. 建立乾淨的 DataFrame (對應你的工作表1格式)
         clean_df = pd.DataFrame()
