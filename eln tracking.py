@@ -17,7 +17,7 @@ with st.sidebar:
     sender_email = st.text_input("寄件人 Gmail", placeholder="example@gmail.com")
     sender_password = st.text_input("應用程式密碼", type="password", placeholder="16位數密碼")
     st.markdown("---")
-    st.info("💡 **最新更新：**\n1. 表格寬度優化 (減少...)\n2. 顯示 KO/KI 的觸發日期與價格\n3. 修正未發行邏輯說明")
+    st.info("💡 **邏輯更新：**\n1. 精確讀取 KO/KI 數值 (支援 97%, 105% 等)\n2. 支援資料清洗 (自動去除 % 符號)\n3. 維持獨立記憶與接股邏輯")
 
 # --- 函數：發送 Email ---
 def send_email(sender, password, receiver, subject, body):
@@ -49,6 +49,17 @@ def parse_nc_months(ko_type_str):
         return int(match.group(1))
     return 1 
 
+# --- 函數：數據清洗 (將 105% 或 97 轉為數字) ---
+def clean_percentage(val):
+    if pd.isna(val) or str(val).strip() == "":
+        return None
+    try:
+        # 移除 % 和逗號，轉為浮點數
+        s = str(val).replace('%', '').replace(',', '').strip()
+        return float(s)
+    except:
+        return None
+
 # --- 函數：尋找欄位 ---
 def find_col_index(columns, keywords):
     for idx, col_name in enumerate(columns):
@@ -59,7 +70,7 @@ def find_col_index(columns, keywords):
 
 # --- 主畫面 ---
 st.title("📊 ELN 結構型商品 - 專業監控戰情室")
-st.markdown("### 🚀 支援 KO/KI 日期價格紀錄、表格寬度優化")
+st.markdown("### 🚀 支援變動 KO 價格 (97%, 105%) 與獨立鎖定")
 
 uploaded_file = st.file_uploader("請上傳 Excel (工作表1格式)", type=['xlsx'])
 
@@ -98,11 +109,15 @@ if uploaded_file is not None:
         clean_df['ID'] = df.iloc[:, id_idx]
         clean_df['IssueDate'] = pd.to_datetime(df.iloc[:, issue_date_idx], errors='coerce') if issue_date_idx else pd.Timestamp.min
         clean_df['ValuationDate'] = pd.to_datetime(df.iloc[:, final_date_idx], errors='coerce') if final_date_idx else pd.Timestamp.max
-        clean_df['KO_Pct'] = pd.to_numeric(df.iloc[:, ko_idx], errors='coerce')
+        
+        # 使用 clean_percentage 清洗數值
+        clean_df['KO_Pct'] = df.iloc[:, ko_idx].apply(clean_percentage)
+        clean_df['KI_Pct'] = df.iloc[:, ki_idx].apply(clean_percentage)
+        clean_df['Strike_Pct'] = df.iloc[:, strike_idx].apply(clean_percentage) if strike_idx else 100.0
+        
         clean_df['KO_Type'] = df.iloc[:, ko_type_idx] if ko_type_idx else ""
-        clean_df['KI_Pct'] = pd.to_numeric(df.iloc[:, ki_idx], errors='coerce')
         clean_df['KI_Type'] = df.iloc[:, ki_type_idx] if ki_type_idx else "AKI"
-        clean_df['Strike_Pct'] = pd.to_numeric(df.iloc[:, strike_idx], errors='coerce') if strike_idx else 100.0
+        
         clean_df['Email'] = df.iloc[:, email_idx] if email_idx else ""
         clean_df['Name'] = df.iloc[:, name_idx] if name_idx else "客戶"
         
@@ -140,12 +155,15 @@ if uploaded_file is not None:
         today = pd.Timestamp.now()
 
         for index, row in clean_df.iterrows():
-            try:
-                ko_thresh = float(row['KO_Pct']) / 100
-                ki_thresh = float(row['KI_Pct']) / 100
-                strike_thresh = float(row['Strike_Pct']) / 100
-            except:
-                ko_thresh = 1.0; ki_thresh = 0.6; strike_thresh = 1.0
+            # 準備參數 (防呆：如果沒填就用預設)
+            ko_thresh_val = row['KO_Pct'] if pd.notna(row['KO_Pct']) else 100.0
+            ki_thresh_val = row['KI_Pct'] if pd.notna(row['KI_Pct']) else 60.0
+            strike_thresh_val = row['Strike_Pct'] if pd.notna(row['Strike_Pct']) else 100.0
+            
+            # 轉成比率 (除以 100)
+            ko_thresh = ko_thresh_val / 100.0
+            ki_thresh = ki_thresh_val / 100.0
+            strike_thresh = strike_thresh_val / 100.0
 
             nc_months = parse_nc_months(row['KO_Type'])
             nc_end_date = row['IssueDate'] + relativedelta(months=nc_months)
@@ -164,8 +182,8 @@ if uploaded_file is not None:
                         'hit_ki': False,
                         'perf': 0.0, 
                         'price': 0.0,
-                        'ko_record': '', # 紀錄 KO 的 日期與價格
-                        'ki_record': ''  # 紀錄 KI 的 日期與價格
+                        'ko_record': '',
+                        'ki_record': '' 
                     })
             
             if not assets: continue
@@ -195,13 +213,13 @@ if uploaded_file is not None:
                     perf = price / asset['initial']
                     date_str = date.strftime('%Y/%m/%d')
                     
-                    # AKI 檢查 (記錄第一次跌破)
+                    # AKI 檢查
                     if is_aki and perf < ki_thresh:
-                        if not asset['hit_ki']: # 只記錄第一次
+                        if not asset['hit_ki']:
                             asset['hit_ki'] = True
                             asset['ki_record'] = f"@{price:.2f} ({date_str})"
                         
-                    # 獨立 KO 檢查 (記錄鎖定日)
+                    # 獨立 KO 檢查 (使用精確的 ko_thresh)
                     if not asset['locked_ko']:
                         if is_post_nc and perf >= ko_thresh:
                             asset['locked_ko'] = True 
@@ -261,19 +279,15 @@ if uploaded_file is not None:
             
             detail_cols = {}
             for i, asset in enumerate(assets):
-                # 簡化 KO/KI 紀錄顯示
                 ko_info = asset['ko_record'] if asset['locked_ko'] else ".."
                 ki_info = asset['ki_record'] if asset['hit_ki'] else ""
                 p_pct = round(asset['perf']*100, 2)
-                
                 email_table += f"{asset['code']:<6} | {ko_info:<18} | {round(asset['price'], 2):<8} | {ki_info:<18}\n"
                 
-                # 在網頁表格中顯示
                 status_icon = "✅" if asset['locked_ko'] else "⚠️" if asset['hit_ki'] else ""
                 detail_str = f"{p_pct}%"
                 if asset['locked_ko']: detail_str += f"\nKO {asset['ko_record']}"
                 if asset['hit_ki']: detail_str += f"\nKI {asset['ki_record']}"
-                
                 detail_cols[f"T{i+1}_狀態"] = detail_str
 
             row_res = {
@@ -283,14 +297,14 @@ if uploaded_file is not None:
                 "發行日": row['IssueDate'].strftime('%Y-%m-%d'),
                 "狀態": final_status,
                 "最差表現": f"{round(worst_perf*100, 2)}%",
+                "設定": f"KO{ko_thresh_val}% / KI{ki_thresh_val}%",
                 "msg_subject": f"【ELN通知】{row['ID']} 狀態：{final_status}",
                 "msg_body": (
                     f"Hi {row['Name']}：\n\n"
                     f"商品 {row['ID']} 最新報告：\n"
                     f"📊 狀態：{final_status}\n"
-                    f"📅 評價日：{row['ValuationDate'].strftime('%Y-%m-%d')}\n"
-                    f"⚡ 條件：KO {row['KO_Pct']}% / KI {row['KI_Pct']}% ({row['KI_Type']})\n"
-                    f"📉 執行價格(Strike)：{row['Strike_Pct']}%\n\n"
+                    f"⚡ 設定：KO {ko_thresh_val}% / KI {ki_thresh_val}% ({row['KI_Type']})\n"
+                    f"📉 執行價格(Strike)：{strike_thresh_val}%\n\n"
                     f"{email_table}\n"
                     f"--------------------------------\n"
                     f"系統自動發送"
@@ -310,16 +324,15 @@ if uploaded_file is not None:
             if "NC" in str(val) or "未發行" in str(val): return 'background-color: #fff3cd; color: #856404'
             return ''
 
-        display_cols = ['債券代號', '狀態', '最差表現', '發行日'] + \
+        display_cols = ['債券代號', '狀態', '設定', '最差表現', '發行日'] + \
                        [c for c in final_df.columns if '_狀態' in c]
         
-        # 設定欄位寬度與格式，解決 ... 問題
         column_config = {
             "狀態": st.column_config.TextColumn("目前狀態", width="large"),
             "債券代號": st.column_config.TextColumn("代號", width="medium"),
+            "設定": st.column_config.TextColumn("KO/KI設定", width="small"),
             "最差表現": st.column_config.TextColumn("Worst Of", width="small"),
         }
-        # 動態加入 T1~T5 的寬度設定
         for c in display_cols:
             if "_狀態" in c:
                 column_config[c] = st.column_config.TextColumn(c, width="medium")
@@ -327,8 +340,8 @@ if uploaded_file is not None:
         st.dataframe(
             final_df[display_cols].style.applymap(color_status, subset=['狀態']), 
             use_container_width=True,
-            column_config=column_config, # 這裡套用寬度設定
-            height=500 # 增加表格高度
+            column_config=column_config,
+            height=500
         )
         
         st.markdown("### 📢 發信操作")
