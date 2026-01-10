@@ -17,7 +17,7 @@ with st.sidebar:
     sender_email = st.text_input("寄件人 Gmail", placeholder="example@gmail.com")
     sender_password = st.text_input("應用程式密碼", type="password", placeholder="16位數密碼")
     st.markdown("---")
-    st.info("💡 **邏輯更新：**\n1. 精確讀取 KO/KI 數值 (支援 97%, 105% 等)\n2. 支援資料清洗 (自動去除 % 符號)\n3. 維持獨立記憶與接股邏輯")
+    st.info("💡 **修正重點：**\n1. KO、KI、執行價分欄顯示\n2. 修正 KO 誤抓執行價的問題\n3. 新增欄位對應檢查器")
 
 # --- 函數：發送 Email ---
 def send_email(sender, password, receiver, subject, body):
@@ -49,28 +49,39 @@ def parse_nc_months(ko_type_str):
         return int(match.group(1))
     return 1 
 
-# --- 函數：數據清洗 (將 105% 或 97 轉為數字) ---
+# --- 函數：數據清洗 ---
 def clean_percentage(val):
     if pd.isna(val) or str(val).strip() == "":
         return None
     try:
-        # 移除 % 和逗號，轉為浮點數
         s = str(val).replace('%', '').replace(',', '').strip()
         return float(s)
     except:
         return None
 
-# --- 函數：尋找欄位 ---
-def find_col_index(columns, keywords):
+# --- 函數：嚴格尋找欄位 (排除法) ---
+def find_col_index(columns, include_keywords, exclude_keywords=None):
+    """
+    include_keywords: 必須包含的字 (OR 邏輯)
+    exclude_keywords: 絕對不能包含的字
+    """
     for idx, col_name in enumerate(columns):
         col_str = str(col_name).strip().lower()
-        if any(k in col_str for k in keywords):
-            return idx
-    return None
+        
+        # 1. 先檢查排除關鍵字 (例如找 KO 時，不能有 Strike)
+        if exclude_keywords:
+            if any(ex in col_str for ex in exclude_keywords):
+                continue
+        
+        # 2. 檢查包含關鍵字
+        if any(inc in col_str for inc in include_keywords):
+            return idx, col_name # 回傳索引和原始名稱
+            
+    return None, None
 
 # --- 主畫面 ---
 st.title("📊 ELN 結構型商品 - 專業監控戰情室")
-st.markdown("### 🚀 支援變動 KO 價格 (97%, 105%) 與獨立鎖定")
+st.markdown("### 🚀 KO/KI/執行價 分欄獨立顯示版")
 
 uploaded_file = st.file_uploader("請上傳 Excel (工作表1格式)", type=['xlsx'])
 
@@ -82,26 +93,52 @@ if uploaded_file is not None:
         except:
             df = pd.read_excel(uploaded_file, sheet_name=0, header=0)
 
+        # 移除中文標題列 (進場價...)
         if df.iloc[0].astype(str).str.contains("進場價").any():
             df = df.iloc[1:].reset_index(drop=True)
 
         cols = df.columns.tolist()
         
-        # 2. 定位欄位
-        id_idx = find_col_index(cols, ["債券", "代號"]) or 0
-        ko_idx = find_col_index(cols, ["ko", "價格"]) or find_col_index(cols, ["ko", "%"])
-        ko_type_idx = find_col_index(cols, ["ko", "類型", "type"])
-        ki_idx = find_col_index(cols, ["ki", "價格"]) or find_col_index(cols, ["ki", "%"])
-        ki_type_idx = find_col_index(cols, ["ki", "類型", "type"])
-        strike_idx = find_col_index(cols, ["執行", "strike"]) 
-        t1_idx = find_col_index(cols, ["標的1"])
-        issue_date_idx = find_col_index(cols, ["發行日"])
-        final_date_idx = find_col_index(cols, ["最終", "評價", "final"])
-        email_idx = find_col_index(cols, ["email", "信箱"])
-        name_idx = find_col_index(cols, ["理專", "姓名", "客戶"])
+        # --- 2. 嚴格定位欄位 (修正抓錯問題) ---
+        # 找 ID
+        id_idx, id_name = find_col_index(cols, ["債券", "代號", "id"])
+        if id_idx is None: id_idx = 0
+        
+        # 找 執行價 (Strike) - 優先找 Strike, 執行, 履約
+        strike_idx, strike_name = find_col_index(cols, ["strike", "執行", "履約", "conversion"])
+        
+        # 找 KO (Knock-Out) - 嚴格排除 Strike, 執行
+        # 關鍵：這裡排除了 "strike", "執行", "履約" 以免抓錯
+        ko_idx, ko_name = find_col_index(cols, ["ko", "knock-out", "提前", "autocall"], exclude_keywords=["strike", "執行", "履約", "ki", "type", "類型"])
+        ko_type_idx, _ = find_col_index(cols, ["ko類型", "ko type", "autocall type"]) # 修正搜尋邏輯
+        if ko_type_idx is None: # 如果找不到專屬欄位，試著找一般 Type
+             ko_type_idx, _ = find_col_index(cols, ["類型", "type"], exclude_keywords=["ki", "ko"])
+
+        # 找 KI (Knock-In) - 排除 KO
+        ki_idx, ki_name = find_col_index(cols, ["ki", "knock-in", "下檔", "barrier"], exclude_keywords=["ko", "type", "類型"])
+        ki_type_idx, _ = find_col_index(cols, ["ki類型", "ki type"])
+        
+        # 找 標的1
+        t1_idx, t1_name = find_col_index(cols, ["標的1", "ticker 1"])
+        
+        # 日期與人名
+        issue_date_idx, _ = find_col_index(cols, ["發行日", "trade date", "start"])
+        final_date_idx, _ = find_col_index(cols, ["最終", "評價", "final", "valuation"])
+        email_idx, _ = find_col_index(cols, ["email", "信箱"])
+        name_idx, _ = find_col_index(cols, ["理專", "姓名", "客戶"])
+
+        # --- 🕵️‍♀️ 欄位除錯區 (給使用者看) ---
+        with st.expander("🕵️‍♀️ 點此檢查：程式抓到的欄位對不對？", expanded=False):
+            st.write("若數值有誤，請檢查以下對應是否正確：")
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("KO 欄位", ko_name if ko_name else "❌ 未找到")
+            col2.metric("KI 欄位", ki_name if ki_name else "❌ 未找到")
+            col3.metric("執行價 欄位", strike_name if strike_name else "❌ 未找到")
+            col4.metric("標的1 欄位", t1_name if t1_name else "❌ 未找到")
+            st.caption("提示：若 KO 抓錯，請確認 Excel 標題有寫 'KO' 且不要包含 '執行' 兩字。")
 
         if t1_idx is None or ko_idx is None:
-            st.error("❌ 欄位辨識失敗")
+            st.error("❌ 嚴重錯誤：無法辨識關鍵欄位 (KO 或 標的1)，請參考上方檢查區修正 Excel 標題。")
             st.stop()
 
         # 3. 建立資料表
@@ -110,7 +147,7 @@ if uploaded_file is not None:
         clean_df['IssueDate'] = pd.to_datetime(df.iloc[:, issue_date_idx], errors='coerce') if issue_date_idx else pd.Timestamp.min
         clean_df['ValuationDate'] = pd.to_datetime(df.iloc[:, final_date_idx], errors='coerce') if final_date_idx else pd.Timestamp.max
         
-        # 使用 clean_percentage 清洗數值
+        # 數值讀取
         clean_df['KO_Pct'] = df.iloc[:, ko_idx].apply(clean_percentage)
         clean_df['KI_Pct'] = df.iloc[:, ki_idx].apply(clean_percentage)
         clean_df['Strike_Pct'] = df.iloc[:, strike_idx].apply(clean_percentage) if strike_idx else 100.0
@@ -124,15 +161,16 @@ if uploaded_file is not None:
         for i in range(1, 6):
             if i == 1: tx_idx = t1_idx
             else:
-                found = find_col_index(cols, [f"標的{i}"])
-                tx_idx = found if found else t1_idx + (i-1)*2
+                tx_idx, _ = find_col_index(cols, [f"標的{i}"])
+                if tx_idx is None: tx_idx = t1_idx + (i-1)*2
+            
             clean_df[f'T{i}_Code'] = df.iloc[:, tx_idx]
             clean_df[f'T{i}_Strike'] = df.iloc[:, tx_idx + 1]
 
         clean_df = clean_df.dropna(subset=['ID'])
         
         # 4. 抓取股價
-        st.info("下載歷史資料進行路徑回測... ☕")
+        st.info("下載歷史資料回測中... ☕")
         all_tickers = []
         for i in range(1, 6):
             tickers = clean_df[f'T{i}_Code'].dropna().astype(str).unique().tolist()
@@ -155,12 +193,11 @@ if uploaded_file is not None:
         today = pd.Timestamp.now()
 
         for index, row in clean_df.iterrows():
-            # 準備參數 (防呆：如果沒填就用預設)
+            # 準備參數
             ko_thresh_val = row['KO_Pct'] if pd.notna(row['KO_Pct']) else 100.0
             ki_thresh_val = row['KI_Pct'] if pd.notna(row['KI_Pct']) else 60.0
             strike_thresh_val = row['Strike_Pct'] if pd.notna(row['Strike_Pct']) else 100.0
             
-            # 轉成比率 (除以 100)
             ko_thresh = ko_thresh_val / 100.0
             ki_thresh = ki_thresh_val / 100.0
             strike_thresh = strike_thresh_val / 100.0
@@ -213,13 +250,11 @@ if uploaded_file is not None:
                     perf = price / asset['initial']
                     date_str = date.strftime('%Y/%m/%d')
                     
-                    # AKI 檢查
                     if is_aki and perf < ki_thresh:
                         if not asset['hit_ki']:
                             asset['hit_ki'] = True
                             asset['ki_record'] = f"@{price:.2f} ({date_str})"
                         
-                    # 獨立 KO 檢查 (使用精確的 ko_thresh)
                     if not asset['locked_ko']:
                         if is_post_nc and perf >= ko_thresh:
                             asset['locked_ko'] = True 
@@ -238,7 +273,7 @@ if uploaded_file is not None:
                     else: curr = float(history_data.iloc[-1][asset['code']])
                     asset['price'] = curr
                     asset['perf'] = curr / asset['initial']
-                    if not is_aki and asset['perf'] < ki_thresh: # EKI
+                    if not is_aki and asset['perf'] < ki_thresh: 
                         asset['hit_ki'] = True
                         asset['ki_record'] = f"@{curr:.2f} (EKI)"
                 except: pass
@@ -297,13 +332,17 @@ if uploaded_file is not None:
                 "發行日": row['IssueDate'].strftime('%Y-%m-%d'),
                 "狀態": final_status,
                 "最差表現": f"{round(worst_perf*100, 2)}%",
-                "設定": f"KO{ko_thresh_val}% / KI{ki_thresh_val}%",
+                # 分欄顯示 KO / KI / Strike
+                "KO設定": f"{ko_thresh_val}%",
+                "KI設定": f"{ki_thresh_val}% ({row['KI_Type']})",
+                "執行價設定": f"{strike_thresh_val}%",
                 "msg_subject": f"【ELN通知】{row['ID']} 狀態：{final_status}",
                 "msg_body": (
                     f"Hi {row['Name']}：\n\n"
                     f"商品 {row['ID']} 最新報告：\n"
                     f"📊 狀態：{final_status}\n"
-                    f"⚡ 設定：KO {ko_thresh_val}% / KI {ki_thresh_val}% ({row['KI_Type']})\n"
+                    f"⚡ KO門檻：{ko_thresh_val}% (獨立)\n"
+                    f"⚡ KI門檻：{ki_thresh_val}% ({row['KI_Type']})\n"
                     f"📉 執行價格(Strike)：{strike_thresh_val}%\n\n"
                     f"{email_table}\n"
                     f"--------------------------------\n"
@@ -324,13 +363,16 @@ if uploaded_file is not None:
             if "NC" in str(val) or "未發行" in str(val): return 'background-color: #fff3cd; color: #856404'
             return ''
 
-        display_cols = ['債券代號', '狀態', '設定', '最差表現', '發行日'] + \
+        # 修正：將 KO設定, KI設定, 執行價設定 加入顯示列表
+        display_cols = ['債券代號', '狀態', 'KO設定', 'KI設定', '執行價設定', '最差表現', '發行日'] + \
                        [c for c in final_df.columns if '_狀態' in c]
         
         column_config = {
             "狀態": st.column_config.TextColumn("目前狀態", width="large"),
             "債券代號": st.column_config.TextColumn("代號", width="medium"),
-            "設定": st.column_config.TextColumn("KO/KI設定", width="small"),
+            "KO設定": st.column_config.TextColumn("KO %", width="small"),
+            "KI設定": st.column_config.TextColumn("KI %", width="small"),
+            "執行價設定": st.column_config.TextColumn("執行價 %", width="small"),
             "最差表現": st.column_config.TextColumn("Worst Of", width="small"),
         }
         for c in display_cols:
