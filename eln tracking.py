@@ -17,7 +17,7 @@ with st.sidebar:
     sender_email = st.text_input("寄件人 Gmail", placeholder="example@gmail.com")
     sender_password = st.text_input("應用程式密碼", type="password", placeholder="16位數密碼")
     st.markdown("---")
-    st.info("💡 **邏輯更新：**\n1. 到期接股時，顯示標的與執行價\n2. 支援獨立記憶 KO\n3. 每日路徑回測 AKI")
+    st.info("💡 **最新更新：**\n1. 表格寬度優化 (減少...)\n2. 顯示 KO/KI 的觸發日期與價格\n3. 修正未發行邏輯說明")
 
 # --- 函數：發送 Email ---
 def send_email(sender, password, receiver, subject, body):
@@ -43,7 +43,7 @@ def send_email(sender, password, receiver, subject, body):
 # --- 函數：解析 NC 月份 ---
 def parse_nc_months(ko_type_str):
     if pd.isna(ko_type_str) or str(ko_type_str).strip() == "":
-        return 1 # 預設 NC1M
+        return 1 
     match = re.search(r'NC(\d+)', str(ko_type_str), re.IGNORECASE)
     if match:
         return int(match.group(1))
@@ -59,7 +59,7 @@ def find_col_index(columns, keywords):
 
 # --- 主畫面 ---
 st.title("📊 ELN 結構型商品 - 專業監控戰情室")
-st.markdown("### 🚀 支援到期接股明細 (標的/執行價)、獨立 KO 鎖定")
+st.markdown("### 🚀 支援 KO/KI 日期價格紀錄、表格寬度優化")
 
 uploaded_file = st.file_uploader("請上傳 Excel (工作表1格式)", type=['xlsx'])
 
@@ -135,7 +135,7 @@ if uploaded_file is not None:
             st.error("美股連線失敗")
             st.stop()
 
-        # 5. 核心邏輯 (每日回測模擬)
+        # 5. 核心邏輯
         results = []
         today = pd.Timestamp.now()
 
@@ -147,11 +147,9 @@ if uploaded_file is not None:
             except:
                 ko_thresh = 1.0; ki_thresh = 0.6; strike_thresh = 1.0
 
-            # 參數
             nc_months = parse_nc_months(row['KO_Type'])
             nc_end_date = row['IssueDate'] + relativedelta(months=nc_months)
             
-            # 初始化資產狀態
             assets = []
             for i in range(1, 6):
                 code = str(row[f'T{i}_Code']).strip()
@@ -161,16 +159,18 @@ if uploaded_file is not None:
                     assets.append({
                         'code': code, 
                         'initial': initial,
-                        'strike_price': initial * strike_thresh, # 計算該股的執行價數值
+                        'strike_price': initial * strike_thresh,
                         'locked_ko': False, 
                         'hit_ki': False,
                         'perf': 0.0, 
-                        'price': 0.0
+                        'price': 0.0,
+                        'ko_record': '', # 紀錄 KO 的 日期與價格
+                        'ki_record': ''  # 紀錄 KI 的 日期與價格
                     })
             
             if not assets: continue
 
-            # --- 模擬回測引擎 ---
+            # --- 回測引擎 ---
             if len(all_tickers) == 1: product_history = history_data
             else: product_history = history_data[[a['code'] for a in assets]]
             
@@ -193,15 +193,19 @@ if uploaded_file is not None:
                     
                     if pd.isna(price): continue
                     perf = price / asset['initial']
+                    date_str = date.strftime('%Y/%m/%d')
                     
-                    # AKI 檢查
+                    # AKI 檢查 (記錄第一次跌破)
                     if is_aki and perf < ki_thresh:
-                        asset['hit_ki'] = True
+                        if not asset['hit_ki']: # 只記錄第一次
+                            asset['hit_ki'] = True
+                            asset['ki_record'] = f"@{price:.2f} ({date_str})"
                         
-                    # 獨立 KO 檢查
+                    # 獨立 KO 檢查 (記錄鎖定日)
                     if not asset['locked_ko']:
                         if is_post_nc and perf >= ko_thresh:
                             asset['locked_ko'] = True 
+                            asset['ko_record'] = f"@{price:.2f} ({date_str})"
                     
                     if not asset['locked_ko']: all_locked = False
                         
@@ -209,78 +213,74 @@ if uploaded_file is not None:
                     product_status = "Early Redemption"
                     early_redemption_date = date
             
-            # --- 取得最終狀態 ---
+            # --- 最終狀態 ---
             for asset in assets:
                 try:
                     if len(all_tickers) == 1: curr = float(history_data.iloc[-1])
                     else: curr = float(history_data.iloc[-1][asset['code']])
                     asset['price'] = curr
                     asset['perf'] = curr / asset['initial']
-                    # EKI 檢查
-                    if not is_aki and asset['perf'] < ki_thresh:
+                    if not is_aki and asset['perf'] < ki_thresh: # EKI
                         asset['hit_ki'] = True
+                        asset['ki_record'] = f"@{curr:.2f} (EKI)"
                 except: pass
 
             hit_any_ki = any(a['hit_ki'] for a in assets)
             all_above_strike_now = all(a['perf'] >= strike_thresh for a in assets)
-            
-            # 找出表現最差的標的 (為了接股準備)
             worst_asset = min(assets, key=lambda x: x['perf'])
             worst_perf = worst_asset['perf']
             
             final_status = ""
             
-            # 1. 尚未發行
             if today < row['IssueDate']:
                 final_status = "⏳ 未發行"
-            
-            # 2. 已提前出場 (KO)
             elif product_status == "Early Redemption":
                 final_status = f"🎉 提前出場 (於 {early_redemption_date.strftime('%Y-%m-%d')})"
-            
-            # 3. 最終評價日 (到期結算)
             elif pd.notna(row['ValuationDate']) and today >= row['ValuationDate']:
                 if all_above_strike_now:
                      final_status = "💰 到期獲利 (全數 > 執行價)"
                 elif hit_any_ki:
-                     # 發生接股：顯示哪一支、執行價多少
                      final_status = f"😭 到期接股: {worst_asset['code']} (執行價 {round(worst_asset['strike_price'], 2)})"
                 else:
                      final_status = "🛡️ 到期保本 (未破KI)"
-            
-            # 4. 存續期間 (觀察中)
             else:
                 locked_count = sum(1 for a in assets if a['locked_ko'])
                 status_parts = []
                 if today < nc_end_date:
-                    status_parts.append(f"🔒 NC閉鎖中")
+                    status_parts.append(f"🔒 NC閉鎖")
                 else:
-                    status_parts.append(f"👀 比價中 (KO: {locked_count}/{len(assets)})")
-                
+                    status_parts.append(f"👀 比價中 (KO:{locked_count}/{len(assets)})")
                 if hit_any_ki:
                     status_parts.append("⚠️ AKI已破")
-                
                 final_status = " ".join(status_parts)
 
             # 準備輸出
             email_table = "【標的詳細狀態】\n"
-            email_table += f"{'代碼':<6} | {'KO鎖定':<6} | {'現價':<8} | {'進場價':<8} | {'表現(%)':<8}\n"
-            email_table += "-"*55 + "\n"
+            email_table += f"{'代碼':<6} | {'KO紀錄':<18} | {'現價':<8} | {'KI紀錄':<18}\n"
+            email_table += "-"*60 + "\n"
             
             detail_cols = {}
             for i, asset in enumerate(assets):
-                lock_icon = "✅" if asset['locked_ko'] else ".."
-                ki_icon = "⚠️" if asset['hit_ki'] else ""
+                # 簡化 KO/KI 紀錄顯示
+                ko_info = asset['ko_record'] if asset['locked_ko'] else ".."
+                ki_info = asset['ki_record'] if asset['hit_ki'] else ""
                 p_pct = round(asset['perf']*100, 2)
-                email_table += f"{asset['code']:<6} | {lock_icon:<6} | {round(asset['price'], 2):<8} | {asset['initial']:<8} | {p_pct:<8} {ki_icon}\n"
-                detail_cols[f"T{i+1}_表現"] = f"{p_pct}% {lock_icon}"
+                
+                email_table += f"{asset['code']:<6} | {ko_info:<18} | {round(asset['price'], 2):<8} | {ki_info:<18}\n"
+                
+                # 在網頁表格中顯示
+                status_icon = "✅" if asset['locked_ko'] else "⚠️" if asset['hit_ki'] else ""
+                detail_str = f"{p_pct}%"
+                if asset['locked_ko']: detail_str += f"\nKO {asset['ko_record']}"
+                if asset['hit_ki']: detail_str += f"\nKI {asset['ki_record']}"
+                
+                detail_cols[f"T{i+1}_狀態"] = detail_str
 
             row_res = {
                 "債券代號": row['ID'],
                 "收件人": row['Name'],
                 "Email": str(row['Email']).strip(),
                 "發行日": row['IssueDate'].strftime('%Y-%m-%d'),
-                "NC解鎖日": nc_end_date.strftime('%Y-%m-%d'),
                 "狀態": final_status,
                 "最差表現": f"{round(worst_perf*100, 2)}%",
                 "msg_subject": f"【ELN通知】{row['ID']} 狀態：{final_status}",
@@ -289,10 +289,9 @@ if uploaded_file is not None:
                     f"商品 {row['ID']} 最新報告：\n"
                     f"📊 狀態：{final_status}\n"
                     f"📅 評價日：{row['ValuationDate'].strftime('%Y-%m-%d')}\n"
-                    f"⚡ 條件：KO {row['KO_Pct']}% (獨立) / KI {row['KI_Pct']}% ({row['KI_Type']})\n"
+                    f"⚡ 條件：KO {row['KO_Pct']}% / KI {row['KI_Pct']}% ({row['KI_Type']})\n"
                     f"📉 執行價格(Strike)：{row['Strike_Pct']}%\n\n"
                     f"{email_table}\n"
-                    f"(✅=已KO鎖定, ⚠️=曾破KI)\n"
                     f"--------------------------------\n"
                     f"系統自動發送"
                 )
@@ -303,18 +302,34 @@ if uploaded_file is not None:
         # 6. 顯示
         final_df = pd.DataFrame(results)
         
-        st.subheader("📋 專業監控列表 (含接股資訊)")
+        st.subheader("📋 專業監控列表")
         
         def color_status(val):
             if "提前" in str(val) or "獲利" in str(val): return 'background-color: #d4edda; color: green'
             if "接股" in str(val) or "AKI" in str(val): return 'background-color: #f8d7da; color: red'
-            if "NC" in str(val): return 'background-color: #fff3cd; color: #856404'
+            if "NC" in str(val) or "未發行" in str(val): return 'background-color: #fff3cd; color: #856404'
             return ''
 
-        display_cols = ['債券代號', '狀態', '最差表現', 'NC解鎖日', '發行日'] + \
-                       [c for c in final_df.columns if '表現' in c and '最差' not in c]
+        display_cols = ['債券代號', '狀態', '最差表現', '發行日'] + \
+                       [c for c in final_df.columns if '_狀態' in c]
         
-        st.dataframe(final_df[display_cols].style.applymap(color_status, subset=['狀態']), use_container_width=True)
+        # 設定欄位寬度與格式，解決 ... 問題
+        column_config = {
+            "狀態": st.column_config.TextColumn("目前狀態", width="large"),
+            "債券代號": st.column_config.TextColumn("代號", width="medium"),
+            "最差表現": st.column_config.TextColumn("Worst Of", width="small"),
+        }
+        # 動態加入 T1~T5 的寬度設定
+        for c in display_cols:
+            if "_狀態" in c:
+                column_config[c] = st.column_config.TextColumn(c, width="medium")
+
+        st.dataframe(
+            final_df[display_cols].style.applymap(color_status, subset=['狀態']), 
+            use_container_width=True,
+            column_config=column_config, # 這裡套用寬度設定
+            height=500 # 增加表格高度
+        )
         
         st.markdown("### 📢 發信操作")
         edited_df = st.data_editor(final_df[['債券代號', '收件人', 'Email', '狀態']], key='editor')
