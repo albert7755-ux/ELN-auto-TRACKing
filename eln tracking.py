@@ -16,8 +16,15 @@ with st.sidebar:
     st.header("📧 設定中心")
     sender_email = st.text_input("寄件人 Gmail", placeholder="example@gmail.com")
     sender_password = st.text_input("應用程式密碼", type="password", placeholder="16位數密碼")
+    
     st.markdown("---")
-    st.info("💡 **修正：** 解決 name 'row_res' is not defined 錯誤")
+    st.header("🕰️ 時光機設定")
+    # 預設為電腦的今天，但允許使用者修改 (方便測試 2026 的單)
+    simulated_today = st.date_input("設定「今天」日期", datetime.now())
+    st.caption(f"目前模擬日期：{simulated_today.strftime('%Y-%m-%d')}")
+    
+    st.markdown("---")
+    st.info("💡 **修正說明：**\n1. 修復變數定義錯誤 (row_res)\n2. 新增日期模擬器 (可測試未來單)\n3. 支援重複標題 (如標的1, 標的1)")
 
 # --- 函數：發送 Email ---
 def send_email(sender, password, receiver, subject, body):
@@ -71,18 +78,27 @@ def find_col_index(columns, include_keywords, exclude_keywords=None):
 
 # --- 主畫面 ---
 st.title("📊 ELN 結構型商品 - 專業監控戰情室")
-st.markdown("### 🚀 詳細價格版 (含天期與完整日期)")
+st.markdown("### 🚀 時光機回測版 (修復變數錯誤)")
 
-uploaded_file = st.file_uploader("請上傳 Excel (工作表1格式)", type=['xlsx'])
+uploaded_file = st.file_uploader("請上傳 Excel (工作表1格式)", type=['xlsx', 'csv']) # 支援 csv 以防萬一
 
 if uploaded_file is not None:
     try:
         # 1. 讀取與清洗
         try:
+            # 嘗試讀取 Excel
             df = pd.read_excel(uploaded_file, sheet_name=0, header=0, engine='openpyxl')
         except:
-            df = pd.read_excel(uploaded_file, sheet_name=0, header=0)
+            # 如果失敗，嘗試讀取 CSV (有些使用者的副檔名雖是 xlsx 但內容是 csv)
+            try:
+                uploaded_file.seek(0)
+                df = pd.read_csv(uploaded_file)
+            except:
+                st.error("❌ 檔案格式讀取失敗，請確認是標準 Excel (.xlsx)")
+                st.stop()
 
+        # 處理重複標題造成的 "進場價" 判斷
+        # 如果第一列包含數字，可能沒有子標題；如果包含文字"進場價"，則刪除
         if df.iloc[0].astype(str).str.contains("進場價").any():
             df = df.iloc[1:].reset_index(drop=True)
 
@@ -126,7 +142,7 @@ if uploaded_file is not None:
         def calc_tenure(row):
             if pd.notna(row['MaturityDate']) and pd.notna(row['IssueDate']):
                 days = (row['MaturityDate'] - row['IssueDate']).days
-                return f"{round(days/365, 1)}年"
+                return f"{round(days/30.5, 1)}個月" # 改成月數可能比較直觀，或維持年
             return "-"
         clean_df['Tenure'] = clean_df.apply(calc_tenure, axis=1)
 
@@ -144,19 +160,30 @@ if uploaded_file is not None:
             if i == 1: tx_idx = t1_idx
             else:
                 tx_idx, _ = find_col_index(cols, [f"標的{i}"])
+                # 如果找不到標的欄位，嘗試用推算的 (假設每2欄一組)
                 if tx_idx is None: tx_idx = t1_idx + (i-1)*2
             
-            clean_df[f'T{i}_Code'] = df.iloc[:, tx_idx]
-            clean_df[f'T{i}_Strike'] = df.iloc[:, tx_idx + 1]
+            # 防呆：確認 index 沒有超出範圍
+            if tx_idx < len(df.columns):
+                clean_df[f'T{i}_Code'] = df.iloc[:, tx_idx]
+                # 假設下一欄是價格
+                if tx_idx + 1 < len(df.columns):
+                    clean_df[f'T{i}_Strike'] = df.iloc[:, tx_idx + 1]
+                else:
+                    clean_df[f'T{i}_Strike'] = 0
+            else:
+                clean_df[f'T{i}_Code'] = ""
+                clean_df[f'T{i}_Strike'] = 0
 
         clean_df = clean_df.dropna(subset=['ID'])
         
         # 4. 抓取股價
-        st.info("下載歷史資料回測中... ☕")
+        st.info(f"下載美股資料... (模擬日期: {simulated_today.strftime('%Y-%m-%d')}) ☕")
         all_tickers = []
         for i in range(1, 6):
-            tickers = clean_df[f'T{i}_Code'].dropna().astype(str).unique().tolist()
-            all_tickers.extend(tickers)
+            if f'T{i}_Code' in clean_df.columns:
+                tickers = clean_df[f'T{i}_Code'].dropna().astype(str).unique().tolist()
+                all_tickers.extend(tickers)
         all_tickers = [t.strip() for t in set(all_tickers) if t != 'nan' and str(t).strip() != '']
         
         if not all_tickers: st.stop()
@@ -165,14 +192,16 @@ if uploaded_file is not None:
         if pd.isna(min_issue_date): min_issue_date = datetime.now() - timedelta(days=365)
         
         try:
-            history_data = yf.download(all_tickers, start=min_issue_date)['Close']
+            # 抓取直到模擬日期的資料
+            history_data = yf.download(all_tickers, start=min_issue_date, end=simulated_today + timedelta(days=1))['Close']
         except:
             st.error("美股連線失敗")
             st.stop()
 
         # 5. 核心邏輯
         results = []
-        today = pd.Timestamp.now()
+        # 使用者設定的模擬今天
+        today = pd.Timestamp(simulated_today)
 
         for index, row in clean_df.iterrows():
             ko_thresh_val = row['KO_Pct'] if pd.notna(row['KO_Pct']) else 100.0
@@ -188,6 +217,7 @@ if uploaded_file is not None:
             
             assets = []
             for i in range(1, 6):
+                if f'T{i}_Code' not in row: continue
                 code = str(row[f'T{i}_Code']).strip()
                 try: initial = float(row[f'T{i}_Strike'])
                 except: initial = 0
@@ -210,7 +240,8 @@ if uploaded_file is not None:
             if len(all_tickers) == 1: product_history = history_data
             else: product_history = history_data[[a['code'] for a in assets]]
             
-            sim_data = product_history[product_history.index >= row['IssueDate']]
+            # 只取 發行日 ~ 模擬今天
+            sim_data = product_history[(product_history.index >= row['IssueDate']) & (product_history.index <= today)]
             
             product_status = "Running"
             early_redemption_date = None
@@ -251,25 +282,30 @@ if uploaded_file is not None:
             locked_list = []
             waiting_list = []
             hit_ki_list = []
-            
-            detail_cols = {} # 暫存 T1_Detail, T2_Detail...
+            detail_cols = {}
 
+            # 取得「模擬今天」的最新價格
             for i, asset in enumerate(assets):
                 try:
-                    if len(all_tickers) == 1: curr = float(history_data.iloc[-1])
-                    else: curr = float(history_data.iloc[-1][asset['code']])
-                    asset['price'] = curr
-                    asset['perf'] = curr / asset['initial']
-                    if not is_aki and asset['perf'] < ki_thresh: 
-                        asset['hit_ki'] = True
-                        asset['ki_record'] = f"@{curr:.2f} (EKI)"
+                    # 嘗試抓最後一筆 (如果 sim_data 空的，表示還沒發行或沒資料)
+                    if not sim_data.empty:
+                        if len(all_tickers) == 1: curr = float(sim_data.iloc[-1])
+                        else: curr = float(sim_data.iloc[-1][asset['code']])
+                    else:
+                        curr = 0 # 沒資料
+                    
+                    if curr > 0:
+                        asset['price'] = curr
+                        asset['perf'] = curr / asset['initial']
+                        if not is_aki and asset['perf'] < ki_thresh: 
+                            asset['hit_ki'] = True
+                            asset['ki_record'] = f"@{curr:.2f} (EKI)"
                 except: pass
                 
                 if asset['locked_ko']: locked_list.append(asset['code'])
                 else: waiting_list.append(asset['code'])
                 if asset['hit_ki']: hit_ki_list.append(asset['code'])
                 
-                # 儲存格內容
                 p_pct = round(asset['perf']*100, 2)
                 status_icon = "✅" if asset['locked_ko'] else "⚠️" if asset['hit_ki'] else ""
                 
@@ -281,8 +317,18 @@ if uploaded_file is not None:
 
             hit_any_ki = any(a['hit_ki'] for a in assets)
             all_above_strike_now = all(a['perf'] >= strike_thresh for a in assets)
-            worst_asset = min(assets, key=lambda x: x['perf'])
-            worst_perf = worst_asset['perf']
+            
+            # 防呆：如果 assets 裡有人 perf 是 0 (沒抓到股價)，min 會錯
+            valid_assets = [a for a in assets if a['perf'] > 0]
+            if valid_assets:
+                worst_asset = min(valid_assets, key=lambda x: x['perf'])
+                worst_perf = worst_asset['perf']
+                worst_code = worst_asset['code']
+                worst_strike_price = worst_asset['strike_price']
+            else:
+                worst_perf = 0
+                worst_code = "N/A"
+                worst_strike_price = 0
             
             # --- 總結狀態 ---
             final_status = ""
@@ -294,7 +340,7 @@ if uploaded_file is not None:
                 if all_above_strike_now:
                      final_status = "💰 到期獲利\n(全數 > 執行價)"
                 elif hit_any_ki:
-                     final_status = f"😭 到期接股\n{worst_asset['code']} @ {round(worst_asset['strike_price'], 2)}"
+                     final_status = f"😭 到期接股\n{worst_code} @ {round(worst_strike_price, 2)}"
                 else:
                      final_status = "🛡️ 到期保本\n(未破KI)"
             else:
@@ -309,7 +355,14 @@ if uploaded_file is not None:
                 if hit_any_ki:
                     final_status += f"\n⚠️ KI已破: {','.join(hit_ki_list)}"
 
-            # --- 組合結果 (修正 row_res 順序問題) ---
+            # 格式化日期字串
+            trade_date_str = row['TradeDate'].strftime('%Y-%m-%d') if pd.notna(row['TradeDate']) else "-"
+            issue_date_str = row['IssueDate'].strftime('%Y-%m-%d') if pd.notna(row['IssueDate']) else "-"
+            val_date_str = row['ValuationDate'].strftime('%Y-%m-%d') if pd.notna(row['ValuationDate']) else "-"
+            mat_date_str = row['MaturityDate'].strftime('%Y-%m-%d') if pd.notna(row['MaturityDate']) else "-"
+
+            # --- 組合結果 ---
+            # 這裡先定義 row_res，確保後面不會有變數未定義的問題
             row_res = {
                 "債券代號": row['ID'],
                 "天期": row['Tenure'],
@@ -321,10 +374,10 @@ if uploaded_file is not None:
                 "KI設定": f"{ki_thresh_val}%",
                 "執行價": f"{strike_thresh_val}%",
                 
-                "交易日": row['TradeDate'].strftime('%Y-%m-%d') if pd.notna(row['TradeDate']) else "-",
-                "發行日": row['IssueDate'].strftime('%Y-%m-%d') if pd.notna(row['IssueDate']) else "-",
-                "最終評價": row['ValuationDate'].strftime('%Y-%m-%d') if pd.notna(row['ValuationDate']) else "-",
-                "到期日": row['MaturityDate'].strftime('%Y-%m-%d') if pd.notna(row['MaturityDate']) else "-",
+                "交易日": trade_date_str,
+                "發行日": issue_date_str,
+                "最終評價": val_date_str,
+                "到期日": mat_date_str,
                 
                 "msg_subject": f"【ELN通知】{row['ID']} 狀態更新",
                 "msg_body": (
@@ -333,65 +386,69 @@ if uploaded_file is not None:
                     f"📊 狀態：\n{final_status}\n\n"
                     f"⚡ 設定：KO {ko_thresh_val}% / KI {ki_thresh_val}% ({row['KI_Type']})\n"
                     f"📉 執行價格(Strike)：{strike_thresh_val}%\n"
-                    f"📅 到期日：{row_res['到期日']}\n\n"
+                    f"📅 到期日：{mat_date_str}\n\n"
                     f"--------------------------------\n"
                     f"系統自動發送"
                 )
             }
-            # 合併詳細資訊
+            # 最後再合併詳細資訊
             row_res.update(detail_cols)
             results.append(row_res)
 
         # 6. 顯示
-        final_df = pd.DataFrame(results)
-        
-        st.subheader("📋 專業監控列表")
-        
-        def color_status(val):
-            if "提前" in str(val) or "獲利" in str(val): return 'background-color: #d4edda; color: green'
-            if "接股" in str(val) or "KI" in str(val): return 'background-color: #f8d7da; color: red'
-            if "未發行" in str(val): return 'background-color: #fff3cd; color: #856404'
-            return ''
+        if not results:
+            st.warning("⚠️ 沒有讀取到有效的資料列，請檢查 Excel 內容。")
+        else:
+            final_df = pd.DataFrame(results)
+            
+            st.subheader("📋 專業監控列表")
+            
+            def color_status(val):
+                if "提前" in str(val) or "獲利" in str(val): return 'background-color: #d4edda; color: green'
+                if "接股" in str(val) or "KI" in str(val): return 'background-color: #f8d7da; color: red'
+                if "未發行" in str(val): return 'background-color: #fff3cd; color: #856404'
+                return ''
 
-        # 排列順序
-        t_cols = [c for c in final_df.columns if '_Detail' in c]
-        t_cols.sort()
-        
-        display_cols = ['債券代號', '天期', '狀態', '最差表現', 'KO設定', 'KI設定', '執行價'] + \
-                       t_cols + \
-                       ['交易日', '發行日', '最終評價', '到期日']
-        
-        column_config = {
-            "狀態": st.column_config.TextColumn("目前狀態摘要", width="large"),
-            "債券代號": st.column_config.TextColumn("代號", width="small"),
-            "天期": st.column_config.TextColumn("天期", width="small"),
-            "KO設定": st.column_config.TextColumn("KO", width="small"),
-            "KI設定": st.column_config.TextColumn("KI", width="small"),
-            "執行價": st.column_config.TextColumn("Strike", width="small"),
-            "最差表現": st.column_config.TextColumn("Worst Of", width="small"),
-        }
-        for i, c in enumerate(t_cols):
-            column_config[c] = st.column_config.TextColumn(f"標的 {i+1}", width="medium")
+            # 動態取得標的欄位
+            t_cols = [c for c in final_df.columns if '_Detail' in c]
+            t_cols.sort()
+            
+            display_cols = ['債券代號', '天期', '狀態', '最差表現', 'KO設定', 'KI設定', '執行價'] + \
+                           t_cols + \
+                           ['交易日', '發行日', '最終評價', '到期日']
+            
+            # 建立表格設定
+            column_config = {
+                "狀態": st.column_config.TextColumn("目前狀態摘要", width="large"),
+                "債券代號": st.column_config.TextColumn("代號", width="small"),
+                "天期": st.column_config.TextColumn("天期", width="small"),
+                "KO設定": st.column_config.TextColumn("KO", width="small"),
+                "KI設定": st.column_config.TextColumn("KI", width="small"),
+                "執行價": st.column_config.TextColumn("Strike", width="small"),
+                "最差表現": st.column_config.TextColumn("Worst Of", width="small"),
+            }
+            for i, c in enumerate(t_cols):
+                column_config[c] = st.column_config.TextColumn(f"標的 {i+1}", width="medium")
 
-        st.dataframe(
-            final_df[display_cols].style.applymap(color_status, subset=['狀態']), 
-            use_container_width=True, 
-            column_config=column_config,
-            height=600,
-            hide_index=True
-        )
-        
-        st.markdown("### 📢 發信操作")
-        edited_df = st.data_editor(final_df[['債券代號', '收件人', 'Email', '狀態']], key='editor')
-        
-        for idx, row in final_df.iterrows():
-            if any(x in row['狀態'] for x in ["提前", "到期", "已破", "獲利", "接股"]):
-                email = edited_df.iloc[idx]['Email']
-                if st.button(f"📧 通知 {row['債券代號']}", key=f"btn_{idx}"):
-                    if sender_email:
-                        send_email(sender_email, sender_password, email, row['msg_subject'], row['msg_body'])
-                    else:
-                        st.error("請填寫寄件人資訊")
+            st.dataframe(
+                final_df[display_cols].style.applymap(color_status, subset=['狀態']), 
+                use_container_width=True, 
+                column_config=column_config,
+                height=600,
+                hide_index=True
+            )
+            
+            st.markdown("### 📢 發信操作")
+            edited_df = st.data_editor(final_df[['債券代號', '收件人', 'Email', '狀態']], key='editor')
+            
+            for idx, row in final_df.iterrows():
+                if any(x in row['狀態'] for x in ["提前", "到期", "已破", "獲利", "接股"]):
+                    email = edited_df.iloc[idx]['Email']
+                    if st.button(f"📧 通知 {row['債券代號']}", key=f"btn_{idx}"):
+                        if sender_email:
+                            send_email(sender_email, sender_password, email, row['msg_subject'], row['msg_body'])
+                        else:
+                            st.error("請填寫寄件人資訊")
 
     except Exception as e:
         st.error(f"發生錯誤：{e}")
