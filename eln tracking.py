@@ -23,7 +23,7 @@ with st.sidebar:
     st.caption(f"模擬日期：{simulated_today.strftime('%Y-%m-%d')}")
     
     st.markdown("---")
-    st.info("💡 **排版更新：**\n1. 標的顯示明確的「原」(進場) 與「現」(現價)\n2. 標題註明 (原始/現價/狀態)\n3. 標的明細移至「最差表現」後方")
+    st.info("💡 **排版更新：**\n1. 標的欄位加寬 (防止內容被擋)\n2. KO/KI/Strike 移至標的後方\n3. 優化閱讀動線")
 
 # --- 函數區 ---
 def send_email(sender, password, receiver, subject, body):
@@ -74,7 +74,7 @@ def find_col_index(columns, include_keywords, exclude_keywords=None):
 
 # --- 主畫面 ---
 st.title("📊 ELN 結構型商品 - 專業監控戰情室")
-st.markdown("### 🚀 詳細標的價格版 (原始/現價對照)")
+st.markdown("### 🚀 詳細標的價格版 (優化寬度與排序)")
 
 uploaded_file = st.file_uploader("請上傳 Excel (工作表1格式)", type=['xlsx', 'csv'])
 
@@ -288,10 +288,7 @@ if uploaded_file is not None:
                 p_pct = round(asset['perf']*100, 2)
                 status_icon = "✅" if asset['locked_ko'] else "⚠️" if asset['hit_ki'] else ""
                 
-                # --- 修改這裡：顯示更清楚的標的資訊 ---
-                # 格式：[AAPL]
-                # 原: 100 / 現: 110
-                # 110% ✅ ...
+                # 內容顯示
                 cell_text = f"【{asset['code']}】\n原: {asset['initial']}\n現: {round(asset['price'], 2)}\n({p_pct}%) {status_icon}"
                 if asset['locked_ko']: cell_text += f"\nKO {asset['ko_record']}"
                 if asset['hit_ki']: cell_text += f"\nKI {asset['ki_record']}"
@@ -387,9 +384,10 @@ if uploaded_file is not None:
             t_cols = [c for c in final_df.columns if '_Detail' in c]
             t_cols.sort()
             
-            # --- 修改欄位順序：標的明細 (t_cols) 放在 最差表現 之後 ---
-            display_cols = ['債券代號', '天期', '狀態', 'KO設定', 'KI設定', '執行價', '最差表現'] + \
+            # --- 順序調整：代號 -> 天期 -> 狀態 -> 最差 -> 標的... -> 設定 -> 日期 ---
+            display_cols = ['債券代號', '天期', '狀態', '最差表現'] + \
                            t_cols + \
+                           ['KO設定', 'KI設定', '執行價'] + \
                            ['交易日', '發行日', '最終評價', '到期日']
             
             column_config = {
@@ -402,8 +400,8 @@ if uploaded_file is not None:
                 "最差表現": st.column_config.TextColumn("Worst Of", width="small"),
             }
             for i, c in enumerate(t_cols):
-                # 標題也改一下，讓使用者知道裡面有原始價格
-                column_config[c] = st.column_config.TextColumn(f"標的 {i+1} (原始/現價/狀態)", width="medium")
+                # 設定寬度為 large，防止被擋
+                column_config[c] = st.column_config.TextColumn(f"標的 {i+1} (原始/現價/狀態)", width="large")
 
             st.dataframe(
                 final_df[display_cols].style.applymap(color_status, subset=['狀態']), 
