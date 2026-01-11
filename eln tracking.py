@@ -23,7 +23,7 @@ with st.sidebar:
     st.caption(f"模擬日期：{simulated_today.strftime('%Y-%m-%d')}")
     
     st.markdown("---")
-    st.info("💡 **排版更新：**\n1. 標的欄位加寬 (防止內容被擋)\n2. KO/KI/Strike 移至標的後方\n3. 優化閱讀動線")
+    st.info("💡 **更新重點：**\n1. 天期改為整數月 (除以30天四捨五入)\n2. 解決 0.1 個月誤差問題")
 
 # --- 函數區 ---
 def send_email(sender, password, receiver, subject, body):
@@ -74,7 +74,7 @@ def find_col_index(columns, include_keywords, exclude_keywords=None):
 
 # --- 主畫面 ---
 st.title("📊 ELN 結構型商品 - 專業監控戰情室")
-st.markdown("### 🚀 詳細標的價格版 (優化寬度與排序)")
+st.markdown("### 🚀 詳細標的價格版 (天期整數修正)")
 
 uploaded_file = st.file_uploader("請上傳 Excel (工作表1格式)", type=['xlsx', 'csv'])
 
@@ -127,10 +127,13 @@ if uploaded_file is not None:
         clean_df['ValuationDate'] = pd.to_datetime(df.iloc[:, final_date_idx], errors='coerce') if final_date_idx else pd.Timestamp.max
         clean_df['MaturityDate'] = pd.to_datetime(df.iloc[:, maturity_date_idx], errors='coerce') if maturity_date_idx else pd.NaT
         
+        # --- 修正天期計算 (整數月) ---
         def calc_tenure(row):
             if pd.notna(row['MaturityDate']) and pd.notna(row['IssueDate']):
                 days = (row['MaturityDate'] - row['IssueDate']).days
-                return f"{round(days/30.5, 1)}個月" 
+                # 使用四捨五入取整數，基數為 30 天
+                months = int(round(days / 30))
+                return f"{months}個月" 
             return "-"
         clean_df['Tenure'] = clean_df.apply(calc_tenure, axis=1)
 
@@ -288,7 +291,6 @@ if uploaded_file is not None:
                 p_pct = round(asset['perf']*100, 2)
                 status_icon = "✅" if asset['locked_ko'] else "⚠️" if asset['hit_ki'] else ""
                 
-                # 內容顯示
                 cell_text = f"【{asset['code']}】\n原: {asset['initial']}\n現: {round(asset['price'], 2)}\n({p_pct}%) {status_icon}"
                 if asset['locked_ko']: cell_text += f"\nKO {asset['ko_record']}"
                 if asset['hit_ki']: cell_text += f"\nKI {asset['ki_record']}"
@@ -384,11 +386,9 @@ if uploaded_file is not None:
             t_cols = [c for c in final_df.columns if '_Detail' in c]
             t_cols.sort()
             
-            # --- 順序調整：代號 -> 天期 -> 狀態 -> 最差 -> 標的... -> 設定 -> 日期 ---
             display_cols = ['債券代號', '天期', '狀態', '最差表現'] + \
                            t_cols + \
-                           ['KO設定', 'KI設定', '執行價'] + \
-                           ['交易日', '發行日', '最終評價', '到期日']
+                           ['KO設定', 'KI設定', '執行價', '交易日', '發行日', '最終評價', '到期日']
             
             column_config = {
                 "狀態": st.column_config.TextColumn("目前狀態摘要", width="large"),
@@ -400,7 +400,6 @@ if uploaded_file is not None:
                 "最差表現": st.column_config.TextColumn("Worst Of", width="small"),
             }
             for i, c in enumerate(t_cols):
-                # 設定寬度為 large，防止被擋
                 column_config[c] = st.column_config.TextColumn(f"標的 {i+1} (原始/現價/狀態)", width="large")
 
             st.dataframe(
