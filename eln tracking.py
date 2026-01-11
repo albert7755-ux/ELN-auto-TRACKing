@@ -17,7 +17,7 @@ with st.sidebar:
     sender_email = st.text_input("寄件人 Gmail", placeholder="example@gmail.com")
     sender_password = st.text_input("應用程式密碼", type="password", placeholder="16位數密碼")
     st.markdown("---")
-    st.info("💡 **排版更新：**\n1. 天期顯示於第二欄\n2. 標的顯示：代碼、現價/進場、表現\n3. 日期資訊移至最後")
+    st.info("💡 **修正：** 解決 name 'row_res' is not defined 錯誤")
 
 # --- 函數：發送 Email ---
 def send_email(sender, password, receiver, subject, body):
@@ -102,7 +102,6 @@ if uploaded_file is not None:
         
         t1_idx, _ = find_col_index(cols, ["標的1", "ticker 1"])
         
-        # 日期欄位偵測
         trade_date_idx, _ = find_col_index(cols, ["交易日", "trade date"])
         issue_date_idx, _ = find_col_index(cols, ["發行日", "issue date", "start"])
         final_date_idx, _ = find_col_index(cols, ["最終", "評價", "final", "valuation"])
@@ -119,13 +118,11 @@ if uploaded_file is not None:
         clean_df = pd.DataFrame()
         clean_df['ID'] = df.iloc[:, id_idx]
         
-        # 日期處理
         clean_df['TradeDate'] = pd.to_datetime(df.iloc[:, trade_date_idx], errors='coerce') if trade_date_idx else pd.NaT
         clean_df['IssueDate'] = pd.to_datetime(df.iloc[:, issue_date_idx], errors='coerce') if issue_date_idx else pd.Timestamp.min
         clean_df['ValuationDate'] = pd.to_datetime(df.iloc[:, final_date_idx], errors='coerce') if final_date_idx else pd.Timestamp.max
         clean_df['MaturityDate'] = pd.to_datetime(df.iloc[:, maturity_date_idx], errors='coerce') if maturity_date_idx else pd.NaT
         
-        # 計算天期 (以年為單位)
         def calc_tenure(row):
             if pd.notna(row['MaturityDate']) and pd.notna(row['IssueDate']):
                 days = (row['MaturityDate'] - row['IssueDate']).days
@@ -250,12 +247,12 @@ if uploaded_file is not None:
                     product_status = "Early Redemption"
                     early_redemption_date = date
             
-            # --- 最終計算與整理 ---
+            # --- 狀態計算 ---
             locked_list = []
             waiting_list = []
             hit_ki_list = []
             
-            detail_cols = {}
+            detail_cols = {} # 暫存 T1_Detail, T2_Detail...
 
             for i, asset in enumerate(assets):
                 try:
@@ -272,11 +269,7 @@ if uploaded_file is not None:
                 else: waiting_list.append(asset['code'])
                 if asset['hit_ki']: hit_ki_list.append(asset['code'])
                 
-                # --- 儲存格內容格式化 (關鍵) ---
-                # 格式：
-                # AAPL
-                # $220.5 / $200.0
-                # 110.25% ✅ (KO @...)
+                # 儲存格內容
                 p_pct = round(asset['perf']*100, 2)
                 status_icon = "✅" if asset['locked_ko'] else "⚠️" if asset['hit_ki'] else ""
                 
@@ -291,7 +284,7 @@ if uploaded_file is not None:
             worst_asset = min(assets, key=lambda x: x['perf'])
             worst_perf = worst_asset['perf']
             
-            # --- 狀態總結 ---
+            # --- 總結狀態 ---
             final_status = ""
             if today < row['IssueDate']:
                 final_status = "⏳ 未發行"
@@ -316,7 +309,7 @@ if uploaded_file is not None:
                 if hit_any_ki:
                     final_status += f"\n⚠️ KI已破: {','.join(hit_ki_list)}"
 
-            # 準備輸出資料列
+            # --- 組合結果 (修正 row_res 順序問題) ---
             row_res = {
                 "債券代號": row['ID'],
                 "天期": row['Tenure'],
@@ -328,7 +321,6 @@ if uploaded_file is not None:
                 "KI設定": f"{ki_thresh_val}%",
                 "執行價": f"{strike_thresh_val}%",
                 
-                # 日期放最後
                 "交易日": row['TradeDate'].strftime('%Y-%m-%d') if pd.notna(row['TradeDate']) else "-",
                 "發行日": row['IssueDate'].strftime('%Y-%m-%d') if pd.notna(row['IssueDate']) else "-",
                 "最終評價": row['ValuationDate'].strftime('%Y-%m-%d') if pd.notna(row['ValuationDate']) else "-",
@@ -346,6 +338,7 @@ if uploaded_file is not None:
                     f"系統自動發送"
                 )
             }
+            # 合併詳細資訊
             row_res.update(detail_cols)
             results.append(row_res)
 
@@ -377,13 +370,12 @@ if uploaded_file is not None:
             "執行價": st.column_config.TextColumn("Strike", width="small"),
             "最差表現": st.column_config.TextColumn("Worst Of", width="small"),
         }
-        # 設定標的欄位的標題
         for i, c in enumerate(t_cols):
             column_config[c] = st.column_config.TextColumn(f"標的 {i+1}", width="medium")
 
         st.dataframe(
             final_df[display_cols].style.applymap(color_status, subset=['狀態']), 
-            use_container_width=True, # 允許寬度延展
+            use_container_width=True, 
             column_config=column_config,
             height=600,
             hide_index=True
