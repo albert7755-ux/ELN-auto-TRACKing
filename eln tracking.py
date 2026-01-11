@@ -23,7 +23,7 @@ with st.sidebar:
     st.caption(f"模擬日期：{simulated_today.strftime('%Y-%m-%d')}")
     
     st.markdown("---")
-    st.info("💡 **修正重點：**\n1. NC 期間強制顯示「🔒 NC閉鎖中」\n2. 閉鎖期內提醒目前達標支數\n3. 狀態優先級校正")
+    st.info("💡 **強力修復：**\n1. 啟動「7日回溯機制」\n2. 遇到假日自動抓前一交易日股價\n3. 徹底解決 AVGO/TSM 顯示為 0 的問題")
 
 # --- 函數區 ---
 def send_email(sender, password, receiver, subject, body):
@@ -74,7 +74,7 @@ def find_col_index(columns, include_keywords, exclude_keywords=None):
 
 # --- 主畫面 ---
 st.title("📊 ELN 結構型商品 - 專業監控戰情室")
-st.markdown("### 🚀 NC 閉鎖期邏輯修正版")
+st.markdown("### 🚀 7日回溯補價版 (拒絕 0 元)")
 
 uploaded_file = st.file_uploader("請上傳 Excel (工作表1格式)", type=['xlsx', 'csv'])
 
@@ -163,8 +163,20 @@ if uploaded_file is not None:
 
         clean_df = clean_df.dropna(subset=['ID'])
         
-        # 4. 抓取股價
-        st.info(f"下載美股資料... (模擬日期: {simulated_today.strftime('%Y-%m-%d')}) ☕")
+        # 4. 抓取股價 (修正：強制回溯 7 天)
+        today_ts = pd.Timestamp(simulated_today)
+        
+        # 確保資料起始點：至少從 (今天 - 14天) 開始抓，保證有緩衝區
+        # 也要包含最早的發行日，為了做回測
+        min_issue_date = clean_df['IssueDate'].min()
+        if pd.isna(min_issue_date): 
+            start_date = today_ts - timedelta(days=30)
+        else:
+            # 取 (最早發行日) 與 (今天-14天) 中較早的那個，確保資料夠多
+            start_date = min(min_issue_date, today_ts - timedelta(days=14))
+            
+        st.info(f"下載美股資料... (回溯至 {start_date.strftime('%Y-%m-%d')}) ☕")
+        
         all_tickers = []
         for i in range(1, 6):
             if f'T{i}_Code' in clean_df.columns:
@@ -174,18 +186,15 @@ if uploaded_file is not None:
         
         if not all_tickers: st.stop()
             
-        min_issue_date = clean_df['IssueDate'].min()
-        if pd.isna(min_issue_date): min_issue_date = datetime.now() - timedelta(days=365)
-        
         try:
-            history_data = yf.download(all_tickers, start=min_issue_date, end=simulated_today + timedelta(days=1))['Close']
+            # 抓取直到模擬日期 + 1 天
+            history_data = yf.download(all_tickers, start=start_date, end=today_ts + timedelta(days=1))['Close']
         except:
             st.error("美股連線失敗")
             st.stop()
 
         # 5. 核心邏輯
         results = []
-        today = pd.Timestamp(simulated_today)
 
         for index, row in clean_df.iterrows():
             ko_thresh_val = row['KO_Pct'] if pd.notna(row['KO_Pct']) else 100.0
@@ -220,90 +229,129 @@ if uploaded_file is not None:
             
             if not assets: continue
 
-            # 回測引擎
-            if len(all_tickers) == 1: product_history = history_data
-            else: product_history = history_data[[a['code'] for a in assets]]
+            # 回測引擎準備
+            if len(all_tickers) == 1: ticker_data_source = history_data
+            else: ticker_data_source = history_data
             
-            sim_data = product_history[(product_history.index >= row['IssueDate']) & (product_history.index <= today)]
-            
+            # --- 步驟 1: 找出「現價」 (Lookback Logic) ---
+            # 不再只看最後一天，而是找 (今天 ~ 今天-7天) 內最後一個有效值
+            for asset in assets:
+                try:
+                    # 取得該股票的 Series
+                    if len(all_tickers) == 1: 
+                        s = ticker_data_source
+                    else:
+                        if asset['code'] in ticker_data_source.columns:
+                            s = ticker_data_source[asset['code']]
+                        else:
+                            continue # 找不到代號
+                    
+                    # 篩選日期 <= 模擬今天
+                    valid_s = s[s.index <= today_ts]
+                    
+                    # 移除 NaN (關鍵！)
+                    valid_s = valid_s.dropna()
+                    
+                    if not valid_s.empty:
+                        # 取最後一筆 (即最近的收盤價)
+                        curr = float(valid_s.iloc[-1])
+                        asset['price'] = curr
+                        asset['perf'] = curr / asset['initial']
+                    else:
+                        asset['price'] = 0 # 真的沒資料
+                        asset['perf'] = 0
+                        
+                except Exception as e:
+                    asset['price'] = 0
+
+            # --- 步驟 2: KO/KI 路徑回測 ---
             product_status = "Running"
             early_redemption_date = None
             is_aki = "AKI" in str(row['KI_Type']).upper()
             
-            for date, prices in sim_data.iterrows():
-                if product_status == "Early Redemption": break
-                is_post_nc = date >= nc_end_date
-                all_locked = True
-                
-                for asset in assets:
-                    try:
-                        if len(assets) == 1 and len(all_tickers) == 1: price = prices
-                        else: price = prices[asset['code']]
-                    except: continue 
-                    
-                    if pd.isna(price): continue
-                    perf = price / asset['initial']
-                    date_str = date.strftime('%Y/%m/%d')
-                    
-                    if is_aki and perf < ki_thresh:
-                        if not asset['hit_ki']:
-                            asset['hit_ki'] = True
-                            asset['ki_record'] = f"@{price:.2f} ({date_str})"
-                        
-                    if not asset['locked_ko']:
-                        if is_post_nc and perf >= ko_thresh:
-                            asset['locked_ko'] = True 
-                            asset['ko_record'] = f"@{price:.2f} ({date_str})"
-                    
-                    if not asset['locked_ko']: all_locked = False
-                        
-                if all_locked:
-                    product_status = "Early Redemption"
-                    early_redemption_date = date
+            # 只回測 發行日 ~ 今天 的範圍
+            # 注意：這裡我們需要針對每一檔股票分別檢查它的有效日期，或統一用 dropna() 後的日期
+            # 簡單起見，我們遍歷日期，但檢查每一檔當天是否有值
             
-            # 狀態計算
+            # 產生回測日期範圍
+            if row['IssueDate'] <= today_ts:
+                # 篩選這段期間的資料 (包含 NaN，我們會跳過)
+                backtest_data = ticker_data_source[(ticker_data_source.index >= row['IssueDate']) & (ticker_data_source.index <= today_ts)]
+                
+                if not backtest_data.empty:
+                    for date, prices in backtest_data.iterrows():
+                        if product_status == "Early Redemption": break
+                        is_post_nc = date >= nc_end_date
+                        all_locked = True
+                        
+                        for asset in assets:
+                            # 取得當日價格
+                            try:
+                                if len(all_tickers) == 1: price = float(prices)
+                                else: price = float(prices[asset['code']])
+                            except: price = float('nan')
+                            
+                            if pd.isna(price) or price == 0: 
+                                if not asset['locked_ko']: all_locked = False # 沒資料當作沒 KO
+                                continue
+                                
+                            perf = price / asset['initial']
+                            date_str = date.strftime('%Y/%m/%d')
+                            
+                            # AKI
+                            if is_aki and perf < ki_thresh:
+                                if not asset['hit_ki']:
+                                    asset['hit_ki'] = True
+                                    asset['ki_record'] = f"@{price:.2f} ({date_str})"
+                            
+                            # KO
+                            if not asset['locked_ko']:
+                                if is_post_nc and perf >= ko_thresh:
+                                    asset['locked_ko'] = True 
+                                    asset['ko_record'] = f"@{price:.2f} ({date_str})"
+                            
+                            if not asset['locked_ko']: all_locked = False
+                        
+                        if all_locked:
+                            product_status = "Early Redemption"
+                            early_redemption_date = date
+
+            # --- 步驟 3: 狀態總結 ---
             locked_list = []
             waiting_list = []
             hit_ki_list = []
-            shadow_ko_list = [] # 用來存「NC期間但價格已達標」的股票
+            shadow_ko_list = [] # NC中但已達標
             
             detail_cols = {}
 
             for i, asset in enumerate(assets):
-                try:
-                    if not sim_data.empty:
-                        if len(all_tickers) == 1: curr = float(sim_data.iloc[-1])
-                        else: curr = float(sim_data.iloc[-1][asset['code']])
-                    else: curr = 0 
+                # 補強檢查：如果是 EKI (到期/當下比)，現在看看有沒有破
+                if asset['price'] > 0:
+                    if not is_aki and asset['perf'] < ki_thresh: 
+                        asset['hit_ki'] = True
+                        asset['ki_record'] = f"@{asset['price']:.2f} (EKI)"
                     
-                    if curr > 0:
-                        asset['price'] = curr
-                        asset['perf'] = curr / asset['initial']
-                        if not is_aki and asset['perf'] < ki_thresh: 
-                            asset['hit_ki'] = True
-                            asset['ki_record'] = f"@{curr:.2f} (EKI)"
-                        
-                        # 檢查 Shadow KO (NC 閉鎖中但價格達標)
-                        if asset['perf'] >= ko_thresh and not asset['locked_ko']:
-                            shadow_ko_list.append(asset['code'])
-                            
-                except: pass
-                
+                    # 影子 KO 檢查
+                    if asset['perf'] >= ko_thresh and not asset['locked_ko']:
+                        shadow_ko_list.append(asset['code'])
+
                 if asset['locked_ko']: locked_list.append(asset['code'])
                 else: waiting_list.append(asset['code'])
                 if asset['hit_ki']: hit_ki_list.append(asset['code'])
                 
-                p_pct = round(asset['perf']*100, 2)
+                p_pct = round(asset['perf']*100, 2) if asset['price'] > 0 else 0.0
                 status_icon = "✅" if asset['locked_ko'] else "⚠️" if asset['hit_ki'] else ""
                 
-                cell_text = f"【{asset['code']}】\n原: {asset['initial']}\n現: {round(asset['price'], 2)}\n({p_pct}%) {status_icon}"
+                price_display = round(asset['price'], 2) if asset['price'] > 0 else "N/A"
+                
+                cell_text = f"【{asset['code']}】\n原: {asset['initial']}\n現: {price_display}\n({p_pct}%) {status_icon}"
                 if asset['locked_ko']: cell_text += f"\nKO {asset['ko_record']}"
                 if asset['hit_ki']: cell_text += f"\nKI {asset['ki_record']}"
                 
                 detail_cols[f"T{i+1}_Detail"] = cell_text
 
             hit_any_ki = any(a['hit_ki'] for a in assets)
-            all_above_strike_now = all(a['perf'] >= strike_thresh for a in assets)
+            all_above_strike_now = all((a['perf'] >= strike_thresh if a['price'] > 0 else False) for a in assets)
             
             valid_assets = [a for a in assets if a['perf'] > 0]
             if valid_assets:
@@ -314,14 +362,13 @@ if uploaded_file is not None:
             else:
                 worst_perf = 0; worst_code = "N/A"; worst_strike_price = 0
             
-            # --- 狀態總結 (關鍵邏輯修正) ---
             final_status = ""
             
-            if today < row['IssueDate']:
+            if today_ts < row['IssueDate']:
                 final_status = "⏳ 未發行"
             elif product_status == "Early Redemption":
                 final_status = f"🎉 提前出場\n({early_redemption_date.strftime('%Y-%m-%d')})"
-            elif pd.notna(row['ValuationDate']) and today >= row['ValuationDate']:
+            elif pd.notna(row['ValuationDate']) and today_ts >= row['ValuationDate']:
                 if all_above_strike_now:
                      final_status = "💰 到期獲利\n(全數 > 執行價)"
                 elif hit_any_ki:
@@ -329,14 +376,11 @@ if uploaded_file is not None:
                 else:
                      final_status = "🛡️ 到期保本\n(未破KI)"
             else:
-                # 判斷是否在 NC 閉鎖期
-                if today < nc_end_date:
+                if today_ts < nc_end_date:
                     final_status = f"🔒 NC閉鎖期\n(至 {nc_end_date.strftime('%Y-%m-%d')})"
-                    # 貼心提醒：雖然閉鎖，但有哪些其實已經達標了？
                     if shadow_ko_list:
                          final_status += f"\n(目前 {len(shadow_ko_list)} 支 > KO價)"
                 else:
-                    # 正常比價期
                     if not waiting_list:
                         final_status = "👀 比價中"
                     else:
@@ -345,7 +389,6 @@ if uploaded_file is not None:
                         if locked_list:
                              final_status += f"\n✅已鎖: {','.join(locked_list)}"
                 
-                # AKI 永遠有效，就算在 NC 也要顯示
                 if hit_any_ki:
                     final_status += f"\n⚠️ KI已破: {','.join(hit_ki_list)}"
 
