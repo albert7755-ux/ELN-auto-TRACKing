@@ -17,7 +17,7 @@ with st.sidebar:
     sender_email = st.text_input("寄件人 Gmail", placeholder="example@gmail.com")
     sender_password = st.text_input("應用程式密碼", type="password", placeholder="16位數密碼")
     st.markdown("---")
-    st.info("💡 **修正重點：**\n1. KO、KI、執行價分欄顯示\n2. 修正 KO 誤抓執行價的問題\n3. 新增欄位對應檢查器")
+    st.info("💡 **介面優化：**\n1. 狀態欄顯示：已鎖定/等待中標的\n2. 合併標的明細，解決表格過寬問題\n3. 標的代碼清楚列出")
 
 # --- 函數：發送 Email ---
 def send_email(sender, password, receiver, subject, body):
@@ -59,29 +59,19 @@ def clean_percentage(val):
     except:
         return None
 
-# --- 函數：嚴格尋找欄位 (排除法) ---
+# --- 函數：嚴格尋找欄位 ---
 def find_col_index(columns, include_keywords, exclude_keywords=None):
-    """
-    include_keywords: 必須包含的字 (OR 邏輯)
-    exclude_keywords: 絕對不能包含的字
-    """
     for idx, col_name in enumerate(columns):
         col_str = str(col_name).strip().lower()
-        
-        # 1. 先檢查排除關鍵字 (例如找 KO 時，不能有 Strike)
         if exclude_keywords:
-            if any(ex in col_str for ex in exclude_keywords):
-                continue
-        
-        # 2. 檢查包含關鍵字
+            if any(ex in col_str for ex in exclude_keywords): continue
         if any(inc in col_str for inc in include_keywords):
-            return idx, col_name # 回傳索引和原始名稱
-            
+            return idx, col_name
     return None, None
 
 # --- 主畫面 ---
 st.title("📊 ELN 結構型商品 - 專業監控戰情室")
-st.markdown("### 🚀 KO/KI/執行價 分欄獨立顯示版")
+st.markdown("### 🚀 智能狀態摘要與版面瘦身版")
 
 uploaded_file = st.file_uploader("請上傳 Excel (工作表1格式)", type=['xlsx'])
 
@@ -93,52 +83,32 @@ if uploaded_file is not None:
         except:
             df = pd.read_excel(uploaded_file, sheet_name=0, header=0)
 
-        # 移除中文標題列 (進場價...)
         if df.iloc[0].astype(str).str.contains("進場價").any():
             df = df.iloc[1:].reset_index(drop=True)
 
         cols = df.columns.tolist()
         
-        # --- 2. 嚴格定位欄位 (修正抓錯問題) ---
-        # 找 ID
-        id_idx, id_name = find_col_index(cols, ["債券", "代號", "id"])
+        # --- 2. 欄位定位 ---
+        id_idx, _ = find_col_index(cols, ["債券", "代號", "id"])
         if id_idx is None: id_idx = 0
         
-        # 找 執行價 (Strike) - 優先找 Strike, 執行, 履約
-        strike_idx, strike_name = find_col_index(cols, ["strike", "執行", "履約", "conversion"])
-        
-        # 找 KO (Knock-Out) - 嚴格排除 Strike, 執行
-        # 關鍵：這裡排除了 "strike", "執行", "履約" 以免抓錯
-        ko_idx, ko_name = find_col_index(cols, ["ko", "knock-out", "提前", "autocall"], exclude_keywords=["strike", "執行", "履約", "ki", "type", "類型"])
-        ko_type_idx, _ = find_col_index(cols, ["ko類型", "ko type", "autocall type"]) # 修正搜尋邏輯
-        if ko_type_idx is None: # 如果找不到專屬欄位，試著找一般 Type
-             ko_type_idx, _ = find_col_index(cols, ["類型", "type"], exclude_keywords=["ki", "ko"])
+        strike_idx, _ = find_col_index(cols, ["strike", "執行", "履約", "conversion"])
+        ko_idx, _ = find_col_index(cols, ["ko", "knock-out", "提前", "autocall"], exclude_keywords=["strike", "執行", "履約", "ki", "type", "類型"])
+        ko_type_idx, _ = find_col_index(cols, ["ko類型", "ko type", "autocall type"])
+        if ko_type_idx is None: ko_type_idx, _ = find_col_index(cols, ["類型", "type"], exclude_keywords=["ki", "ko"])
 
-        # 找 KI (Knock-In) - 排除 KO
-        ki_idx, ki_name = find_col_index(cols, ["ki", "knock-in", "下檔", "barrier"], exclude_keywords=["ko", "type", "類型"])
+        ki_idx, _ = find_col_index(cols, ["ki", "knock-in", "下檔", "barrier"], exclude_keywords=["ko", "type", "類型"])
         ki_type_idx, _ = find_col_index(cols, ["ki類型", "ki type"])
         
-        # 找 標的1
-        t1_idx, t1_name = find_col_index(cols, ["標的1", "ticker 1"])
+        t1_idx, _ = find_col_index(cols, ["標的1", "ticker 1"])
         
-        # 日期與人名
         issue_date_idx, _ = find_col_index(cols, ["發行日", "trade date", "start"])
         final_date_idx, _ = find_col_index(cols, ["最終", "評價", "final", "valuation"])
         email_idx, _ = find_col_index(cols, ["email", "信箱"])
         name_idx, _ = find_col_index(cols, ["理專", "姓名", "客戶"])
 
-        # --- 🕵️‍♀️ 欄位除錯區 (給使用者看) ---
-        with st.expander("🕵️‍♀️ 點此檢查：程式抓到的欄位對不對？", expanded=False):
-            st.write("若數值有誤，請檢查以下對應是否正確：")
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("KO 欄位", ko_name if ko_name else "❌ 未找到")
-            col2.metric("KI 欄位", ki_name if ki_name else "❌ 未找到")
-            col3.metric("執行價 欄位", strike_name if strike_name else "❌ 未找到")
-            col4.metric("標的1 欄位", t1_name if t1_name else "❌ 未找到")
-            st.caption("提示：若 KO 抓錯，請確認 Excel 標題有寫 'KO' 且不要包含 '執行' 兩字。")
-
         if t1_idx is None or ko_idx is None:
-            st.error("❌ 嚴重錯誤：無法辨識關鍵欄位 (KO 或 標的1)，請參考上方檢查區修正 Excel 標題。")
+            st.error("❌ 嚴重錯誤：無法辨識關鍵欄位 (KO 或 標的1)。")
             st.stop()
 
         # 3. 建立資料表
@@ -147,7 +117,6 @@ if uploaded_file is not None:
         clean_df['IssueDate'] = pd.to_datetime(df.iloc[:, issue_date_idx], errors='coerce') if issue_date_idx else pd.Timestamp.min
         clean_df['ValuationDate'] = pd.to_datetime(df.iloc[:, final_date_idx], errors='coerce') if final_date_idx else pd.Timestamp.max
         
-        # 數值讀取
         clean_df['KO_Pct'] = df.iloc[:, ko_idx].apply(clean_percentage)
         clean_df['KI_Pct'] = df.iloc[:, ki_idx].apply(clean_percentage)
         clean_df['Strike_Pct'] = df.iloc[:, strike_idx].apply(clean_percentage) if strike_idx else 100.0
@@ -193,7 +162,6 @@ if uploaded_file is not None:
         today = pd.Timestamp.now()
 
         for index, row in clean_df.iterrows():
-            # 準備參數
             ko_thresh_val = row['KO_Pct'] if pd.notna(row['KO_Pct']) else 100.0
             ki_thresh_val = row['KI_Pct'] if pd.notna(row['KI_Pct']) else 60.0
             strike_thresh_val = row['Strike_Pct'] if pd.notna(row['Strike_Pct']) else 100.0
@@ -266,7 +234,13 @@ if uploaded_file is not None:
                     product_status = "Early Redemption"
                     early_redemption_date = date
             
-            # --- 最終狀態 ---
+            # --- 最終計算與整理 ---
+            locked_list = []
+            waiting_list = []
+            hit_ki_list = []
+            
+            detail_lines = [] # 用來存合併的欄位資訊
+
             for asset in assets:
                 try:
                     if len(all_tickers) == 1: curr = float(history_data.iloc[-1])
@@ -277,53 +251,75 @@ if uploaded_file is not None:
                         asset['hit_ki'] = True
                         asset['ki_record'] = f"@{curr:.2f} (EKI)"
                 except: pass
+                
+                # 分類
+                if asset['locked_ko']: locked_list.append(asset['code'])
+                else: waiting_list.append(asset['code'])
+                
+                if asset['hit_ki']: hit_ki_list.append(asset['code'])
+                
+                # 建立合併欄位的文字 (Code + Perf + Icon)
+                p_pct = round(asset['perf']*100, 2)
+                status_icon = "✅" if asset['locked_ko'] else "⚠️" if asset['hit_ki'] else ""
+                
+                # 格式：[AAPL] 105% ✅ (換行) KO @...
+                line_str = f"[{asset['code']}] {p_pct}% {status_icon}"
+                if asset['locked_ko']: line_str += f" (KO {asset['ko_record']})"
+                if asset['hit_ki']: line_str += f" (KI {asset['ki_record']})"
+                
+                detail_lines.append(line_str)
 
             hit_any_ki = any(a['hit_ki'] for a in assets)
             all_above_strike_now = all(a['perf'] >= strike_thresh for a in assets)
             worst_asset = min(assets, key=lambda x: x['perf'])
             worst_perf = worst_asset['perf']
             
+            # --- 狀態總結生成 (Smart Status) ---
             final_status = ""
             
             if today < row['IssueDate']:
                 final_status = "⏳ 未發行"
             elif product_status == "Early Redemption":
-                final_status = f"🎉 提前出場 (於 {early_redemption_date.strftime('%Y-%m-%d')})"
+                final_status = f"🎉 提前出場\n({early_redemption_date.strftime('%Y-%m-%d')})"
             elif pd.notna(row['ValuationDate']) and today >= row['ValuationDate']:
                 if all_above_strike_now:
-                     final_status = "💰 到期獲利 (全數 > 執行價)"
+                     final_status = "💰 到期獲利\n(全數 > 執行價)"
                 elif hit_any_ki:
-                     final_status = f"😭 到期接股: {worst_asset['code']} (執行價 {round(worst_asset['strike_price'], 2)})"
+                     final_status = f"😭 到期接股\n{worst_asset['code']} @ {round(worst_asset['strike_price'], 2)}"
                 else:
-                     final_status = "🛡️ 到期保本 (未破KI)"
+                     final_status = "🛡️ 到期保本\n(未破KI)"
             else:
-                locked_count = sum(1 for a in assets if a['locked_ko'])
+                # 存續期間 - 智慧摘要
                 status_parts = []
                 if today < nc_end_date:
-                    status_parts.append(f"🔒 NC閉鎖")
+                    status_parts.append(f"🔒 NC閉鎖中")
                 else:
-                    status_parts.append(f"👀 比價中 (KO:{locked_count}/{len(assets)})")
+                    # 顯示誰鎖定了，誰還在等
+                    wait_str = ",".join(waiting_list)
+                    lock_str = ",".join(locked_list)
+                    
+                    if not waiting_list:
+                        status_parts.append("👀 比價中")
+                    else:
+                        sub_msg = f"⏳等待: {wait_str}"
+                        if locked_list:
+                            sub_msg = f"✅已鎖: {lock_str}\n" + sub_msg
+                        status_parts.append(f"👀 比價中\n{sub_msg}")
+                
                 if hit_any_ki:
-                    status_parts.append("⚠️ AKI已破")
-                final_status = " ".join(status_parts)
+                    ki_str = ",".join(hit_ki_list)
+                    status_parts.append(f"⚠️ KI已破: {ki_str}")
+                
+                final_status = "\n".join(status_parts)
 
             # 準備輸出
             email_table = "【標的詳細狀態】\n"
             email_table += f"{'代碼':<6} | {'KO紀錄':<18} | {'現價':<8} | {'KI紀錄':<18}\n"
             email_table += "-"*60 + "\n"
-            
-            detail_cols = {}
-            for i, asset in enumerate(assets):
-                ko_info = asset['ko_record'] if asset['locked_ko'] else ".."
-                ki_info = asset['ki_record'] if asset['hit_ki'] else ""
-                p_pct = round(asset['perf']*100, 2)
-                email_table += f"{asset['code']:<6} | {ko_info:<18} | {round(asset['price'], 2):<8} | {ki_info:<18}\n"
-                
-                status_icon = "✅" if asset['locked_ko'] else "⚠️" if asset['hit_ki'] else ""
-                detail_str = f"{p_pct}%"
-                if asset['locked_ko']: detail_str += f"\nKO {asset['ko_record']}"
-                if asset['hit_ki']: detail_str += f"\nKI {asset['ki_record']}"
-                detail_cols[f"T{i+1}_狀態"] = detail_str
+            for asset in assets:
+                 ko_info = asset['ko_record'] if asset['locked_ko'] else ".."
+                 ki_info = asset['ki_record'] if asset['hit_ki'] else ""
+                 email_table += f"{asset['code']:<6} | {ko_info:<18} | {round(asset['price'], 2):<8} | {ki_info:<18}\n"
 
             row_res = {
                 "債券代號": row['ID'],
@@ -332,24 +328,24 @@ if uploaded_file is not None:
                 "發行日": row['IssueDate'].strftime('%Y-%m-%d'),
                 "狀態": final_status,
                 "最差表現": f"{round(worst_perf*100, 2)}%",
-                # 分欄顯示 KO / KI / Strike
                 "KO設定": f"{ko_thresh_val}%",
-                "KI設定": f"{ki_thresh_val}% ({row['KI_Type']})",
-                "執行價設定": f"{strike_thresh_val}%",
-                "msg_subject": f"【ELN通知】{row['ID']} 狀態：{final_status}",
+                "KI設定": f"{ki_thresh_val}%",
+                "執行價": f"{strike_thresh_val}%",
+                # 將多個標的資訊合併成一個欄位
+                "標的明細 (代碼/表現/紀錄)": "\n".join(detail_lines),
+                
+                "msg_subject": f"【ELN通知】{row['ID']} 狀態更新",
                 "msg_body": (
                     f"Hi {row['Name']}：\n\n"
                     f"商品 {row['ID']} 最新報告：\n"
-                    f"📊 狀態：{final_status}\n"
-                    f"⚡ KO門檻：{ko_thresh_val}% (獨立)\n"
-                    f"⚡ KI門檻：{ki_thresh_val}% ({row['KI_Type']})\n"
+                    f"📊 狀態：\n{final_status}\n\n"
+                    f"⚡ 設定：KO {ko_thresh_val}% / KI {ki_thresh_val}% ({row['KI_Type']})\n"
                     f"📉 執行價格(Strike)：{strike_thresh_val}%\n\n"
                     f"{email_table}\n"
                     f"--------------------------------\n"
                     f"系統自動發送"
                 )
             }
-            row_res.update(detail_cols)
             results.append(row_res)
 
         # 6. 顯示
@@ -359,38 +355,36 @@ if uploaded_file is not None:
         
         def color_status(val):
             if "提前" in str(val) or "獲利" in str(val): return 'background-color: #d4edda; color: green'
-            if "接股" in str(val) or "AKI" in str(val): return 'background-color: #f8d7da; color: red'
+            if "接股" in str(val) or "KI" in str(val): return 'background-color: #f8d7da; color: red'
             if "NC" in str(val) or "未發行" in str(val): return 'background-color: #fff3cd; color: #856404'
             return ''
 
-        # 修正：將 KO設定, KI設定, 執行價設定 加入顯示列表
-        display_cols = ['債券代號', '狀態', 'KO設定', 'KI設定', '執行價設定', '最差表現', '發行日'] + \
-                       [c for c in final_df.columns if '_狀態' in c]
+        # 這裡選擇要顯示的欄位，不再顯示 T1_狀態... T5_狀態
+        display_cols = ['債券代號', '狀態', '最差表現', '標的明細 (代碼/表現/紀錄)', 'KO設定', 'KI設定', '執行價', '發行日']
         
         column_config = {
-            "狀態": st.column_config.TextColumn("目前狀態", width="large"),
-            "債券代號": st.column_config.TextColumn("代號", width="medium"),
-            "KO設定": st.column_config.TextColumn("KO %", width="small"),
-            "KI設定": st.column_config.TextColumn("KI %", width="small"),
-            "執行價設定": st.column_config.TextColumn("執行價 %", width="small"),
+            "狀態": st.column_config.TextColumn("目前狀態摘要", width="large", help="顯示目前鎖定與等待進度"),
+            "債券代號": st.column_config.TextColumn("代號", width="small"),
+            "KO設定": st.column_config.TextColumn("KO", width="small"),
+            "KI設定": st.column_config.TextColumn("KI", width="small"),
+            "執行價": st.column_config.TextColumn("Strike", width="small"),
             "最差表現": st.column_config.TextColumn("Worst Of", width="small"),
+            "標的明細 (代碼/表現/紀錄)": st.column_config.TextColumn("標的明細 (Code / Perf / History)", width="large"),
         }
-        for c in display_cols:
-            if "_狀態" in c:
-                column_config[c] = st.column_config.TextColumn(c, width="medium")
 
         st.dataframe(
             final_df[display_cols].style.applymap(color_status, subset=['狀態']), 
             use_container_width=True,
             column_config=column_config,
-            height=500
+            height=600, # 表格加高，因為現在內容有換行
+            hide_index=True
         )
         
         st.markdown("### 📢 發信操作")
         edited_df = st.data_editor(final_df[['債券代號', '收件人', 'Email', '狀態']], key='editor')
         
         for idx, row in final_df.iterrows():
-            if any(x in row['狀態'] for x in ["提前", "到期", "AKI", "獲利", "接股"]):
+            if any(x in row['狀態'] for x in ["提前", "到期", "已破", "獲利", "接股"]):
                 email = edited_df.iloc[idx]['Email']
                 if st.button(f"📧 通知 {row['債券代號']}", key=f"btn_{idx}"):
                     if sender_email:
