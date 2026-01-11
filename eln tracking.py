@@ -19,14 +19,13 @@ with st.sidebar:
     
     st.markdown("---")
     st.header("🕰️ 時光機設定")
-    # 預設為電腦的今天，但允許使用者修改 (方便測試 2026 的單)
     simulated_today = st.date_input("設定「今天」日期", datetime.now())
-    st.caption(f"目前模擬日期：{simulated_today.strftime('%Y-%m-%d')}")
+    st.caption(f"模擬日期：{simulated_today.strftime('%Y-%m-%d')}")
     
     st.markdown("---")
-    st.info("💡 **修正說明：**\n1. 修復變數定義錯誤 (row_res)\n2. 新增日期模擬器 (可測試未來單)\n3. 支援重複標題 (如標的1, 標的1)")
+    st.info("💡 **排版更新：**\n1. 標的顯示明確的「原」(進場) 與「現」(現價)\n2. 標題註明 (原始/現價/狀態)\n3. 標的明細移至「最差表現」後方")
 
-# --- 函數：發送 Email ---
+# --- 函數區 ---
 def send_email(sender, password, receiver, subject, body):
     if not sender or not password or not receiver:
         st.warning("⚠️ 寄件資料不完整")
@@ -47,7 +46,6 @@ def send_email(sender, password, receiver, subject, body):
         st.error(f"❌ 發送失敗：{e}")
         return False
 
-# --- 函數：解析 NC 月份 ---
 def parse_nc_months(ko_type_str):
     if pd.isna(ko_type_str) or str(ko_type_str).strip() == "":
         return 1 
@@ -56,7 +54,6 @@ def parse_nc_months(ko_type_str):
         return int(match.group(1))
     return 1 
 
-# --- 函數：數據清洗 ---
 def clean_percentage(val):
     if pd.isna(val) or str(val).strip() == "":
         return None
@@ -66,7 +63,6 @@ def clean_percentage(val):
     except:
         return None
 
-# --- 函數：嚴格尋找欄位 ---
 def find_col_index(columns, include_keywords, exclude_keywords=None):
     for idx, col_name in enumerate(columns):
         col_str = str(col_name).strip().lower()
@@ -78,27 +74,19 @@ def find_col_index(columns, include_keywords, exclude_keywords=None):
 
 # --- 主畫面 ---
 st.title("📊 ELN 結構型商品 - 專業監控戰情室")
-st.markdown("### 🚀 時光機回測版 (修復變數錯誤)")
+st.markdown("### 🚀 詳細標的價格版 (原始/現價對照)")
 
-uploaded_file = st.file_uploader("請上傳 Excel (工作表1格式)", type=['xlsx', 'csv']) # 支援 csv 以防萬一
+uploaded_file = st.file_uploader("請上傳 Excel (工作表1格式)", type=['xlsx', 'csv'])
 
 if uploaded_file is not None:
     try:
-        # 1. 讀取與清洗
+        # 1. 讀取
         try:
-            # 嘗試讀取 Excel
             df = pd.read_excel(uploaded_file, sheet_name=0, header=0, engine='openpyxl')
         except:
-            # 如果失敗，嘗試讀取 CSV (有些使用者的副檔名雖是 xlsx 但內容是 csv)
-            try:
-                uploaded_file.seek(0)
-                df = pd.read_csv(uploaded_file)
-            except:
-                st.error("❌ 檔案格式讀取失敗，請確認是標準 Excel (.xlsx)")
-                st.stop()
+            uploaded_file.seek(0)
+            df = pd.read_csv(uploaded_file)
 
-        # 處理重複標題造成的 "進場價" 判斷
-        # 如果第一列包含數字，可能沒有子標題；如果包含文字"進場價"，則刪除
         if df.iloc[0].astype(str).str.contains("進場價").any():
             df = df.iloc[1:].reset_index(drop=True)
 
@@ -142,7 +130,7 @@ if uploaded_file is not None:
         def calc_tenure(row):
             if pd.notna(row['MaturityDate']) and pd.notna(row['IssueDate']):
                 days = (row['MaturityDate'] - row['IssueDate']).days
-                return f"{round(days/30.5, 1)}個月" # 改成月數可能比較直觀，或維持年
+                return f"{round(days/30.5, 1)}個月" 
             return "-"
         clean_df['Tenure'] = clean_df.apply(calc_tenure, axis=1)
 
@@ -160,13 +148,10 @@ if uploaded_file is not None:
             if i == 1: tx_idx = t1_idx
             else:
                 tx_idx, _ = find_col_index(cols, [f"標的{i}"])
-                # 如果找不到標的欄位，嘗試用推算的 (假設每2欄一組)
                 if tx_idx is None: tx_idx = t1_idx + (i-1)*2
             
-            # 防呆：確認 index 沒有超出範圍
             if tx_idx < len(df.columns):
                 clean_df[f'T{i}_Code'] = df.iloc[:, tx_idx]
-                # 假設下一欄是價格
                 if tx_idx + 1 < len(df.columns):
                     clean_df[f'T{i}_Strike'] = df.iloc[:, tx_idx + 1]
                 else:
@@ -192,7 +177,6 @@ if uploaded_file is not None:
         if pd.isna(min_issue_date): min_issue_date = datetime.now() - timedelta(days=365)
         
         try:
-            # 抓取直到模擬日期的資料
             history_data = yf.download(all_tickers, start=min_issue_date, end=simulated_today + timedelta(days=1))['Close']
         except:
             st.error("美股連線失敗")
@@ -200,7 +184,6 @@ if uploaded_file is not None:
 
         # 5. 核心邏輯
         results = []
-        # 使用者設定的模擬今天
         today = pd.Timestamp(simulated_today)
 
         for index, row in clean_df.iterrows():
@@ -236,11 +219,10 @@ if uploaded_file is not None:
             
             if not assets: continue
 
-            # --- 回測引擎 ---
+            # 回測引擎
             if len(all_tickers) == 1: product_history = history_data
             else: product_history = history_data[[a['code'] for a in assets]]
             
-            # 只取 發行日 ~ 模擬今天
             sim_data = product_history[(product_history.index >= row['IssueDate']) & (product_history.index <= today)]
             
             product_status = "Running"
@@ -278,21 +260,18 @@ if uploaded_file is not None:
                     product_status = "Early Redemption"
                     early_redemption_date = date
             
-            # --- 狀態計算 ---
+            # 狀態計算
             locked_list = []
             waiting_list = []
             hit_ki_list = []
             detail_cols = {}
 
-            # 取得「模擬今天」的最新價格
             for i, asset in enumerate(assets):
                 try:
-                    # 嘗試抓最後一筆 (如果 sim_data 空的，表示還沒發行或沒資料)
                     if not sim_data.empty:
                         if len(all_tickers) == 1: curr = float(sim_data.iloc[-1])
                         else: curr = float(sim_data.iloc[-1][asset['code']])
-                    else:
-                        curr = 0 # 沒資料
+                    else: curr = 0 
                     
                     if curr > 0:
                         asset['price'] = curr
@@ -309,7 +288,11 @@ if uploaded_file is not None:
                 p_pct = round(asset['perf']*100, 2)
                 status_icon = "✅" if asset['locked_ko'] else "⚠️" if asset['hit_ki'] else ""
                 
-                cell_text = f"{asset['code']}\n${round(asset['price'], 2)} / ${round(asset['initial'], 2)}\n{p_pct}% {status_icon}"
+                # --- 修改這裡：顯示更清楚的標的資訊 ---
+                # 格式：[AAPL]
+                # 原: 100 / 現: 110
+                # 110% ✅ ...
+                cell_text = f"【{asset['code']}】\n原: {asset['initial']}\n現: {round(asset['price'], 2)}\n({p_pct}%) {status_icon}"
                 if asset['locked_ko']: cell_text += f"\nKO {asset['ko_record']}"
                 if asset['hit_ki']: cell_text += f"\nKI {asset['ki_record']}"
                 
@@ -318,7 +301,6 @@ if uploaded_file is not None:
             hit_any_ki = any(a['hit_ki'] for a in assets)
             all_above_strike_now = all(a['perf'] >= strike_thresh for a in assets)
             
-            # 防呆：如果 assets 裡有人 perf 是 0 (沒抓到股價)，min 會錯
             valid_assets = [a for a in assets if a['perf'] > 0]
             if valid_assets:
                 worst_asset = min(valid_assets, key=lambda x: x['perf'])
@@ -326,11 +308,8 @@ if uploaded_file is not None:
                 worst_code = worst_asset['code']
                 worst_strike_price = worst_asset['strike_price']
             else:
-                worst_perf = 0
-                worst_code = "N/A"
-                worst_strike_price = 0
+                worst_perf = 0; worst_code = "N/A"; worst_strike_price = 0
             
-            # --- 總結狀態 ---
             final_status = ""
             if today < row['IssueDate']:
                 final_status = "⏳ 未發行"
@@ -355,14 +334,11 @@ if uploaded_file is not None:
                 if hit_any_ki:
                     final_status += f"\n⚠️ KI已破: {','.join(hit_ki_list)}"
 
-            # 格式化日期字串
             trade_date_str = row['TradeDate'].strftime('%Y-%m-%d') if pd.notna(row['TradeDate']) else "-"
             issue_date_str = row['IssueDate'].strftime('%Y-%m-%d') if pd.notna(row['IssueDate']) else "-"
             val_date_str = row['ValuationDate'].strftime('%Y-%m-%d') if pd.notna(row['ValuationDate']) else "-"
             mat_date_str = row['MaturityDate'].strftime('%Y-%m-%d') if pd.notna(row['MaturityDate']) else "-"
 
-            # --- 組合結果 ---
-            # 這裡先定義 row_res，確保後面不會有變數未定義的問題
             row_res = {
                 "債券代號": row['ID'],
                 "天期": row['Tenure'],
@@ -391,7 +367,6 @@ if uploaded_file is not None:
                     f"系統自動發送"
                 )
             }
-            # 最後再合併詳細資訊
             row_res.update(detail_cols)
             results.append(row_res)
 
@@ -409,15 +384,14 @@ if uploaded_file is not None:
                 if "未發行" in str(val): return 'background-color: #fff3cd; color: #856404'
                 return ''
 
-            # 動態取得標的欄位
             t_cols = [c for c in final_df.columns if '_Detail' in c]
             t_cols.sort()
             
-            display_cols = ['債券代號', '天期', '狀態', '最差表現', 'KO設定', 'KI設定', '執行價'] + \
+            # --- 修改欄位順序：標的明細 (t_cols) 放在 最差表現 之後 ---
+            display_cols = ['債券代號', '天期', '狀態', 'KO設定', 'KI設定', '執行價', '最差表現'] + \
                            t_cols + \
                            ['交易日', '發行日', '最終評價', '到期日']
             
-            # 建立表格設定
             column_config = {
                 "狀態": st.column_config.TextColumn("目前狀態摘要", width="large"),
                 "債券代號": st.column_config.TextColumn("代號", width="small"),
@@ -428,7 +402,8 @@ if uploaded_file is not None:
                 "最差表現": st.column_config.TextColumn("Worst Of", width="small"),
             }
             for i, c in enumerate(t_cols):
-                column_config[c] = st.column_config.TextColumn(f"標的 {i+1}", width="medium")
+                # 標題也改一下，讓使用者知道裡面有原始價格
+                column_config[c] = st.column_config.TextColumn(f"標的 {i+1} (原始/現價/狀態)", width="medium")
 
             st.dataframe(
                 final_df[display_cols].style.applymap(color_status, subset=['狀態']), 
