@@ -23,7 +23,7 @@ with st.sidebar:
     st.caption(f"模擬日期：{simulated_today.strftime('%Y-%m-%d')}")
     
     st.markdown("---")
-    st.info("💡 **更新重點：**\n1. 天期改為整數月 (除以30天四捨五入)\n2. 解決 0.1 個月誤差問題")
+    st.info("💡 **修正重點：**\n1. NC 期間強制顯示「🔒 NC閉鎖中」\n2. 閉鎖期內提醒目前達標支數\n3. 狀態優先級校正")
 
 # --- 函數區 ---
 def send_email(sender, password, receiver, subject, body):
@@ -74,7 +74,7 @@ def find_col_index(columns, include_keywords, exclude_keywords=None):
 
 # --- 主畫面 ---
 st.title("📊 ELN 結構型商品 - 專業監控戰情室")
-st.markdown("### 🚀 詳細標的價格版 (天期整數修正)")
+st.markdown("### 🚀 NC 閉鎖期邏輯修正版")
 
 uploaded_file = st.file_uploader("請上傳 Excel (工作表1格式)", type=['xlsx', 'csv'])
 
@@ -127,11 +127,9 @@ if uploaded_file is not None:
         clean_df['ValuationDate'] = pd.to_datetime(df.iloc[:, final_date_idx], errors='coerce') if final_date_idx else pd.Timestamp.max
         clean_df['MaturityDate'] = pd.to_datetime(df.iloc[:, maturity_date_idx], errors='coerce') if maturity_date_idx else pd.NaT
         
-        # --- 修正天期計算 (整數月) ---
         def calc_tenure(row):
             if pd.notna(row['MaturityDate']) and pd.notna(row['IssueDate']):
                 days = (row['MaturityDate'] - row['IssueDate']).days
-                # 使用四捨五入取整數，基數為 30 天
                 months = int(round(days / 30))
                 return f"{months}個月" 
             return "-"
@@ -267,6 +265,8 @@ if uploaded_file is not None:
             locked_list = []
             waiting_list = []
             hit_ki_list = []
+            shadow_ko_list = [] # 用來存「NC期間但價格已達標」的股票
+            
             detail_cols = {}
 
             for i, asset in enumerate(assets):
@@ -282,6 +282,11 @@ if uploaded_file is not None:
                         if not is_aki and asset['perf'] < ki_thresh: 
                             asset['hit_ki'] = True
                             asset['ki_record'] = f"@{curr:.2f} (EKI)"
+                        
+                        # 檢查 Shadow KO (NC 閉鎖中但價格達標)
+                        if asset['perf'] >= ko_thresh and not asset['locked_ko']:
+                            shadow_ko_list.append(asset['code'])
+                            
                 except: pass
                 
                 if asset['locked_ko']: locked_list.append(asset['code'])
@@ -309,7 +314,9 @@ if uploaded_file is not None:
             else:
                 worst_perf = 0; worst_code = "N/A"; worst_strike_price = 0
             
+            # --- 狀態總結 (關鍵邏輯修正) ---
             final_status = ""
+            
             if today < row['IssueDate']:
                 final_status = "⏳ 未發行"
             elif product_status == "Early Redemption":
@@ -322,14 +329,23 @@ if uploaded_file is not None:
                 else:
                      final_status = "🛡️ 到期保本\n(未破KI)"
             else:
-                if not waiting_list:
-                    final_status = "👀 比價中"
+                # 判斷是否在 NC 閉鎖期
+                if today < nc_end_date:
+                    final_status = f"🔒 NC閉鎖期\n(至 {nc_end_date.strftime('%Y-%m-%d')})"
+                    # 貼心提醒：雖然閉鎖，但有哪些其實已經達標了？
+                    if shadow_ko_list:
+                         final_status += f"\n(目前 {len(shadow_ko_list)} 支 > KO價)"
                 else:
-                    wait_str = ",".join(waiting_list)
-                    final_status = f"👀 比價中\n⏳等待: {wait_str}"
-                    if locked_list:
-                         final_status += f"\n✅已鎖: {','.join(locked_list)}"
+                    # 正常比價期
+                    if not waiting_list:
+                        final_status = "👀 比價中"
+                    else:
+                        wait_str = ",".join(waiting_list)
+                        final_status = f"👀 比價中\n⏳等待: {wait_str}"
+                        if locked_list:
+                             final_status += f"\n✅已鎖: {','.join(locked_list)}"
                 
+                # AKI 永遠有效，就算在 NC 也要顯示
                 if hit_any_ki:
                     final_status += f"\n⚠️ KI已破: {','.join(hit_ki_list)}"
 
@@ -380,7 +396,7 @@ if uploaded_file is not None:
             def color_status(val):
                 if "提前" in str(val) or "獲利" in str(val): return 'background-color: #d4edda; color: green'
                 if "接股" in str(val) or "KI" in str(val): return 'background-color: #f8d7da; color: red'
-                if "未發行" in str(val): return 'background-color: #fff3cd; color: #856404'
+                if "未發行" in str(val) or "NC" in str(val): return 'background-color: #fff3cd; color: #856404'
                 return ''
 
             t_cols = [c for c in final_df.columns if '_Detail' in c]
