@@ -9,7 +9,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 # --- 設定網頁 ---
-st.set_page_config(page_title="ELN 戰情室 (Email 多人發送版)", layout="wide")
+st.set_page_config(page_title="ELN 戰情室 (Email 智慧過濾版)", layout="wide")
 
 # ==========================================
 # 🔐 雲端機密讀取 (Gmail)
@@ -49,10 +49,17 @@ with st.sidebar:
     st.caption("鎖定為真實日期")
 
     st.markdown("---")
-    st.info("💡 **多人發送技巧**\nExcel 的 Email 欄位可以用「逗號」分隔多人。\n例如: `a@test.com, b@test.com`")
+    st.header("🔔 通知過濾設定")
+    st.caption("設定此項讓您**不用刪除舊資料**，程式會自動忽略舊的事件。")
+    
+    # 🌟 關鍵新功能：回溯天數
+    lookback_days = st.slider("只通知幾天內發生的事件？", min_value=1, max_value=30, value=3, help="例如設為 3，表示只會通知「今天、昨天、前天」發生的 KO/到期事件。更早之前的會被忽略。")
+    
+    notify_ki_daily = st.checkbox("KI (跌破) 是否每天提醒？", value=True, help="打勾：只要股價在 KI 以下就每天發通知。\n不打勾：只在「剛跌破」的那幾天通知。")
+
+    st.info("💡 **多人發送技巧**\nExcel 的 Email 欄位可以用「逗號」分隔多人。")
 
 # --- 函數區 ---
-
 def send_email_gmail(to_email, subject, body_text):
     if not GMAIL_ACCOUNT or not GMAIL_PASSWORD or not to_email:
         return False
@@ -105,9 +112,9 @@ def find_col_index(columns, include_keywords, exclude_keywords=None):
     return None, None
 
 # --- 主畫面 ---
-st.title("📊 ELN 結構型商品 - Email 多人發送版")
+st.title("📊 ELN 結構型商品 - Email 智慧過濾版")
 
-uploaded_file = st.file_uploader("請上傳 Excel (支援多組 Email 用逗號分隔)", type=['xlsx', 'csv'], key="uploader")
+uploaded_file = st.file_uploader("請上傳 Excel (舊的 KO 資料不用刪，程式會自動過濾)", type=['xlsx', 'csv'], key="uploader")
 
 if uploaded_file:
     if st.session_state['last_processed_file'] != uploaded_file.name:
@@ -218,6 +225,9 @@ if uploaded_file is not None:
         results = []
         admin_summary_list = [] 
         individual_messages = [] 
+        
+        # 定義回溯時間點
+        lookback_date = today_ts - timedelta(days=lookback_days)
 
         for index, row in clean_df.iterrows():
             ko_thresh_val = row['KO_Pct'] if pd.notna(row['KO_Pct']) else 100.0
@@ -324,28 +334,50 @@ if uploaded_file is not None:
             if valid_assets:
                 worst_asset = min(valid_assets, key=lambda x: x['perf'])
                 worst_perf = worst_asset['perf']
+                worst_code = worst_asset['code']
             else:
-                worst_perf = 0
+                worst_perf = 0; worst_code = "N/A"
             
             final_status = ""
             line_status_short = "" 
+            
+            # 🌟 這裡加入「是否需要通知」的過濾邏輯
+            need_notify = False
 
             if today_ts < row['IssueDate']:
                 final_status = "⏳ 未發行"
             elif product_status == "Early Redemption":
+                # KO 邏輯
                 final_status = f"🎉 提前出場\n({early_redemption_date.strftime('%Y-%m-%d')})"
-                line_status_short = "🎉 恭喜！已提前出場 (KO)"
+                if early_redemption_date >= lookback_date:
+                    line_status_short = "🎉 恭喜！已提前出場 (KO)"
+                    need_notify = True
+                else:
+                    line_status_short = f"🎉 已於 {early_redemption_date.strftime('%Y-%m-%d')} 提前出場 (舊)"
+                    need_notify = False
+                    
             elif pd.notna(row['ValuationDate']) and today_ts >= row['ValuationDate']:
+                # 到期邏輯
+                is_recent_maturity = row['ValuationDate'] >= lookback_date
+                
                 if all_above_strike_now:
                      final_status = "💰 到期獲利\n(全數 > 執行價)"
                      line_status_short = "💰 到期獲利"
                 elif hit_any_ki:
                      final_status = f"😭 到期接股"
-                     line_status_short = f"😭 到期接股"
+                     line_status_short = f"😭 到期接股 (Worst: {worst_code})"
                 else:
                      final_status = "🛡️ 到期保本\n(未破KI)"
                      line_status_short = "🛡️ 到期保本"
+                
+                if is_recent_maturity:
+                    need_notify = True
+                else:
+                    line_status_short += " (舊)"
+                    need_notify = False
+
             else:
+                # 執行中
                 if today_ts < nc_end_date:
                     final_status = f"🔒 NC閉鎖期\n(至 {nc_end_date.strftime('%Y-%m-%d')})"
                     if shadow_ko_list: final_status += f"\n(目前 {len(shadow_ko_list)} 支 > KO價)"
@@ -355,18 +387,24 @@ if uploaded_file is not None:
                         wait_str = ",".join(waiting_list)
                         final_status = f"👀 比價中\n⏳等待: {wait_str}"
                         if locked_list: final_status += f"\n✅已鎖: {','.join(locked_list)}"
+                
                 if hit_any_ki:
                     final_status += f"\n⚠️ KI已破: {','.join(hit_ki_list)}"
                     line_status_short = f"⚠️ 注意：KI 已跌破 ({','.join(hit_ki_list)})"
+                    if notify_ki_daily:
+                        need_notify = True
+                    else:
+                        need_notify = False 
 
             if line_status_short:
                 admin_summary_list.append(f"● {row['ID']} ({row['Name']}): {line_status_short}")
             
-            # 🚀 多人發送邏輯 (Email)
+            # 🚀 決定是否發送個別通知 (Email)
             target_emails = row.get('Email', '')
             email_list = [x.strip() for x in re.split(r'[;,，]', str(target_emails)) if x.strip()]
             
-            if email_list and line_status_short:
+            # 只有當 need_notify = True 時，才把訊息加入寄送清單
+            if email_list and line_status_short and need_notify:
                 subject = f"【ELN通知】{row['ID']} 最新狀態通知"
                 msg = (f"Hi {row['Name']} 您好，\n\n"
                        f"您的結構型商品 {row['ID']} 最新狀態如下：\n"
@@ -424,7 +462,6 @@ if uploaded_file is not None:
 
             st.dataframe(final_df[display_cols].style.applymap(color_status, subset=['狀態']), use_container_width=True, column_config=column_config, height=600, hide_index=True)
             
-            # 按鈕
             st.markdown("### 📢 發送操作")
             
             if st.session_state['is_sent']:
@@ -434,6 +471,8 @@ if uploaded_file is not None:
                     st.rerun()
             else:
                 btn_label = f"📧 發送 Email 通知 (預計: {len(individual_messages)} 位收件者 + 1 位管理員)"
+                st.caption(f"ℹ️ 根據左側設定，目前只發送 **過去 {lookback_days} 天內** 的新事件。")
+
                 if st.button(btn_label, type="primary"):
                     success_count = 0
                     
@@ -441,26 +480,34 @@ if uploaded_file is not None:
                     my_bar = st.progress(0, text=progress_text)
                     
                     total_msgs = len(individual_messages)
-                    for idx, (mail, subj, body) in enumerate(individual_messages):
-                        if send_email_gmail(mail, subj, body):
-                            success_count += 1
-                        if total_msgs > 0:
-                            my_bar.progress((idx + 1) / total_msgs, text=f"發送中... ({idx+1}/{total_msgs})")
-                    
-                    my_bar.empty()
+                    if total_msgs == 0:
+                        my_bar.empty()
+                        st.info("👀 經檢查，今天沒有「新發生的」通知需要發送。")
+                    else:
+                        for idx, (mail, subj, body) in enumerate(individual_messages):
+                            if send_email_gmail(mail, subj, body):
+                                success_count += 1
+                            if total_msgs > 0:
+                                my_bar.progress((idx + 1) / total_msgs, text=f"發送中... ({idx+1}/{total_msgs})")
+                        my_bar.empty()
                     
                     if admin_summary_list:
                         admin_subject = f"【ELN 戰情快報 (管理員)】 {real_today.strftime('%Y/%m/%d')}"
                         admin_body = f"今日摘要報告：\n----------------\n" + "\n".join(admin_summary_list)
                         if success_count > 0:
-                            admin_body += f"\n\n(已另行發送 {success_count} 封個別信件)"
+                            admin_body += f"\n\n(已另行發送 {success_count} 封「新事件」信件)"
+                        else:
+                            admin_body += f"\n\n(今日無新事件，未發送個別信件)"
                         send_email_gmail(ADMIN_EMAIL, admin_subject, admin_body)
                     else:
                          send_email_gmail(ADMIN_EMAIL, f"【ELN 戰情快報】{real_today.strftime('%Y/%m/%d')}", "今日無特殊事件。")
                     
                     st.session_state['is_sent'] = True
-                    st.success(f"🎉 發送完畢！成功寄出 {success_count} 封客戶信件。")
-                    st.balloons()
+                    if success_count > 0:
+                        st.success(f"🎉 發送完畢！成功寄出 {success_count} 封客戶信件。")
+                        st.balloons()
+                    else:
+                        st.success("✅ 檢查完畢，沒有新的通知需要發送。")
 
     except Exception as e:
         st.error(f"發生錯誤：{e}")
