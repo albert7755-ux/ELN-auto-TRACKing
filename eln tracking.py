@@ -9,22 +9,20 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 # --- 設定網頁 ---
-st.set_page_config(page_title="ELN 戰情室 (Email 發送版)", layout="wide")
+st.set_page_config(page_title="ELN 戰情室 (Email 多人發送版)", layout="wide")
 
 # ==========================================
 # 🔐 雲端機密讀取 (Gmail)
 # ==========================================
 try:
-    # 嘗試讀取 Gmail 設定
     GMAIL_ACCOUNT = st.secrets["GMAIL_ACCOUNT"]
     GMAIL_PASSWORD = st.secrets["GMAIL_PASSWORD"]
-    # 如果有設定管理員接收信箱，可讀取，若無則預設寄回給寄件者
     try:
         ADMIN_EMAIL = st.secrets["ADMIN_EMAIL"]
     except:
-        ADMIN_EMAIL = GMAIL_ACCOUNT # 預設管理員就是自己
+        ADMIN_EMAIL = GMAIL_ACCOUNT 
 except Exception:
-    st.error("⚠️ Secrets 設定不完整！請確認已設定 GMAIL_ACCOUNT 與 GMAIL_PASSWORD。")
+    st.error("⚠️ Secrets 設定不完整！")
     GMAIL_ACCOUNT = ""
     GMAIL_PASSWORD = ""
     ADMIN_EMAIL = ""
@@ -41,7 +39,7 @@ if 'is_sent' not in st.session_state:
 with st.sidebar:
     st.header("✉️ 設定中心")
     if GMAIL_ACCOUNT and GMAIL_PASSWORD:
-        st.success(f"✅ Email 設定已讀取\n({GMAIL_ACCOUNT})")
+        st.success(f"✅ Email 設定已讀取")
     else:
         st.error("❌ Email 設定未完成")
 
@@ -51,16 +49,14 @@ with st.sidebar:
     st.caption("鎖定為真實日期")
 
     st.markdown("---")
-    st.info("💡 **模式：手動發送**\n上傳檔案後，請至頁面最下方按下按鈕才會開始寄信。")
+    st.info("💡 **多人發送技巧**\nExcel 的 Email 欄位可以用「逗號」分隔多人。\n例如: `a@test.com, b@test.com`")
 
 # --- 函數區 ---
 
 def send_email_gmail(to_email, subject, body_text):
-    """透過 Gmail 發送郵件"""
     if not GMAIL_ACCOUNT or not GMAIL_PASSWORD or not to_email:
         return False
     
-    # 簡單驗證 Email 格式
     if "@" not in str(to_email):
         return False
 
@@ -71,7 +67,6 @@ def send_email_gmail(to_email, subject, body_text):
         msg['Subject'] = subject
         msg.attach(MIMEText(body_text, 'plain'))
 
-        # 連線到 Gmail Server
         server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
         server.login(GMAIL_ACCOUNT, GMAIL_PASSWORD)
         server.send_message(msg)
@@ -94,7 +89,6 @@ def clean_percentage(val):
         return float(s)
     except: return None
 
-# 🌟 姓名清洗器 (消滅 nan)
 def clean_name_str(val):
     if pd.isna(val): return "貴賓"
     s = str(val).strip()
@@ -111,32 +105,29 @@ def find_col_index(columns, include_keywords, exclude_keywords=None):
     return None, None
 
 # --- 主畫面 ---
-st.title("📊 ELN 結構型商品 - Email 戰情室")
+st.title("📊 ELN 結構型商品 - Email 多人發送版")
 
-uploaded_file = st.file_uploader("請上傳 Excel (含 Email 欄位)", type=['xlsx', 'csv'], key="uploader")
+uploaded_file = st.file_uploader("請上傳 Excel (支援多組 Email 用逗號分隔)", type=['xlsx', 'csv'], key="uploader")
 
 if uploaded_file:
-    # 換檔案重置狀態
     if st.session_state['last_processed_file'] != uploaded_file.name:
         st.session_state['last_processed_file'] = uploaded_file.name
         st.session_state['is_sent'] = False
 
 if uploaded_file is not None:
     try:
-        # 1. 讀取資料
         try:
             df = pd.read_excel(uploaded_file, sheet_name=0, header=0, engine='openpyxl')
         except:
             uploaded_file.seek(0)
             df = pd.read_csv(uploaded_file)
 
-        df = df.dropna(how='all') # 刪除全空行
+        df = df.dropna(how='all')
 
         if df.iloc[0].astype(str).str.contains("進場價").any():
             df = df.iloc[1:].reset_index(drop=True)
         cols = df.columns.tolist()
         
-        # 2. 定位欄位
         id_idx, _ = find_col_index(cols, ["債券", "代號", "id"]) or (0, "")
         strike_idx, _ = find_col_index(cols, ["strike", "執行", "履約"])
         ko_idx, _ = find_col_index(cols, ["ko", "提前"], exclude_keywords=["strike", "執行", "ki", "type"])
@@ -144,36 +135,31 @@ if uploaded_file is not None:
         ki_idx, _ = find_col_index(cols, ["ki", "下檔"], exclude_keywords=["ko", "type"])
         ki_type_idx, _ = find_col_index(cols, ["ki類型", "ki type"])
         t1_idx, _ = find_col_index(cols, ["標的1", "ticker 1"])
-        
         trade_date_idx, _ = find_col_index(cols, ["交易日"])
         issue_date_idx, _ = find_col_index(cols, ["發行日"])
         final_date_idx, _ = find_col_index(cols, ["最終", "評價"])
         maturity_date_idx, _ = find_col_index(cols, ["到期", "maturity"])
         name_idx, _ = find_col_index(cols, ["理專", "姓名", "客戶"])
         
-        # 🌟 關鍵：尋找 Email 欄位 (支援多種寫法)
         email_idx, email_col_name = find_col_index(cols, ["email", "e-mail", "mail", "信箱", "郵箱"])
 
         if email_idx is not None:
-            st.toast(f"✅ 成功辨識 Email 欄位：{email_col_name}", icon="✉️")
+            st.toast(f"✅ Email 欄位：{email_col_name} (支援逗號分隔)", icon="✉️")
         else:
-            st.warning("⚠️ 找不到 Email 欄位，將只會產生管理員摘要，無法發送個別通知。")
+            st.warning("⚠️ 找不到 Email 欄位")
 
         if t1_idx is None or ko_idx is None:
-            st.error("❌ 嚴重錯誤：無法辨識關鍵欄位 (KO 或 標的1)。")
+            st.error("❌ 嚴重錯誤：無法辨識關鍵欄位。")
             st.stop()
 
-        # 3. 建立資料表
         clean_df = pd.DataFrame()
         clean_df['ID'] = df.iloc[:, id_idx]
         
-        # 姓名清洗
         if name_idx is not None:
             clean_df['Name'] = df.iloc[:, name_idx].apply(clean_name_str)
         else:
             clean_df['Name'] = "貴賓"
             
-        # Email 清洗
         if email_idx is not None:
             clean_df['Email'] = df.iloc[:, email_idx].astype(str).replace('nan', '').str.strip()
         else:
@@ -210,7 +196,6 @@ if uploaded_file is not None:
 
         clean_df = clean_df.dropna(subset=['ID'])
         
-        # 4. 下載股價
         today_ts = pd.Timestamp(real_today)
         min_issue_date = clean_df['IssueDate'].min()
         start_date = today_ts - timedelta(days=30) if pd.isna(min_issue_date) else min(min_issue_date, today_ts - timedelta(days=14))
@@ -230,7 +215,6 @@ if uploaded_file is not None:
             st.error("美股連線失敗")
             st.stop()
 
-        # 5. 運算邏輯
         results = []
         admin_summary_list = [] 
         individual_messages = [] 
@@ -375,15 +359,14 @@ if uploaded_file is not None:
                     final_status += f"\n⚠️ KI已破: {','.join(hit_ki_list)}"
                     line_status_short = f"⚠️ 注意：KI 已跌破 ({','.join(hit_ki_list)})"
 
-            # 收集【給管理員】的摘要
             if line_status_short:
                 admin_summary_list.append(f"● {row['ID']} ({row['Name']}): {line_status_short}")
             
-            # 收集【個別通知】
-            target_email = row.get('Email', '')
-            target_email_str = str(target_email).strip()
+            # 🚀 多人發送邏輯 (Email)
+            target_emails = row.get('Email', '')
+            email_list = [x.strip() for x in re.split(r'[;,，]', str(target_emails)) if x.strip()]
             
-            if target_email_str and "@" in target_email_str and line_status_short:
+            if email_list and line_status_short:
                 subject = f"【ELN通知】{row['ID']} 最新狀態通知"
                 msg = (f"Hi {row['Name']} 您好，\n\n"
                        f"您的結構型商品 {row['ID']} 最新狀態如下：\n"
@@ -394,7 +377,10 @@ if uploaded_file is not None:
                        f"--------------------------------\n"
                        f"理財專員貼心通知\n"
                        f"(本信件由系統自動發送，請勿直接回覆)")
-                individual_messages.append( (target_email_str, subject, msg) )
+                
+                for mail in email_list:
+                    if "@" in mail:
+                        individual_messages.append( (mail, subject, msg) )
 
             trade_date_str = row['TradeDate'].strftime('%Y-%m-%d') if pd.notna(row['TradeDate']) else "-"
             issue_date_str = row['IssueDate'].strftime('%Y-%m-%d') if pd.notna(row['IssueDate']) else "-"
@@ -402,7 +388,7 @@ if uploaded_file is not None:
             mat_date_str = row['MaturityDate'].strftime('%Y-%m-%d') if pd.notna(row['MaturityDate']) else "-"
 
             row_res = {
-                "債券代號": row['ID'], "Email": target_email_str, "天期": row['Tenure'], "收件人": row['Name'],
+                "債券代號": row['ID'], "Email": target_emails, "天期": row['Tenure'], "收件人": row['Name'],
                 "狀態": final_status, "最差表現": f"{round(worst_perf*100, 2)}%",
                 "KO設定": f"{ko_thresh_val}%", "KI設定": f"{ki_thresh_val}%", "執行價": f"{strike_thresh_val}%",
                 "交易日": trade_date_str, "發行日": issue_date_str, "最終評價": val_date_str, "到期日": mat_date_str
@@ -410,7 +396,6 @@ if uploaded_file is not None:
             row_res.update(detail_cols)
             results.append(row_res)
 
-        # 6. 顯示結果
         if not results:
             st.warning("⚠️ 無資料")
         else:
@@ -427,7 +412,7 @@ if uploaded_file is not None:
             display_cols = ['債券代號', '天期', '狀態', '最差表現'] + t_cols + ['Email', 'KO設定', 'KI設定', '執行價', '交易日', '發行日', '最終評價', '到期日']
             column_config = {
                 "狀態": st.column_config.TextColumn("目前狀態摘要", width="large"),
-                "Email": st.column_config.TextColumn("Email", width="small"),
+                "Email": st.column_config.TextColumn("Emails", width="medium"),
                 "債券代號": st.column_config.TextColumn("代號", width="small"),
                 "天期": st.column_config.TextColumn("天期", width="small"),
                 "KO設定": st.column_config.TextColumn("KO", width="small"),
@@ -439,9 +424,7 @@ if uploaded_file is not None:
 
             st.dataframe(final_df[display_cols].style.applymap(color_status, subset=['狀態']), use_container_width=True, column_config=column_config, height=600, hide_index=True)
             
-            # ==========================================
-            # 🚀 手動發送按鈕
-            # ==========================================
+            # 按鈕
             st.markdown("### 📢 發送操作")
             
             if st.session_state['is_sent']:
@@ -450,11 +433,10 @@ if uploaded_file is not None:
                     st.session_state['is_sent'] = False
                     st.rerun()
             else:
-                btn_label = f"📧 發送 Email 通知 (預計: {len(individual_messages)} 位客戶 + 1 位管理員)"
+                btn_label = f"📧 發送 Email 通知 (預計: {len(individual_messages)} 位收件者 + 1 位管理員)"
                 if st.button(btn_label, type="primary"):
                     success_count = 0
                     
-                    # 1. 發給個別客戶
                     progress_text = "正在寄送客戶通知..."
                     my_bar = st.progress(0, text=progress_text)
                     
@@ -467,12 +449,11 @@ if uploaded_file is not None:
                     
                     my_bar.empty()
                     
-                    # 2. 發給管理員 (Admin)
                     if admin_summary_list:
                         admin_subject = f"【ELN 戰情快報 (管理員)】 {real_today.strftime('%Y/%m/%d')}"
                         admin_body = f"今日摘要報告：\n----------------\n" + "\n".join(admin_summary_list)
                         if success_count > 0:
-                            admin_body += f"\n\n(已另行發送 {success_count} 封個別信件給客戶)"
+                            admin_body += f"\n\n(已另行發送 {success_count} 封個別信件)"
                         send_email_gmail(ADMIN_EMAIL, admin_subject, admin_body)
                     else:
                          send_email_gmail(ADMIN_EMAIL, f"【ELN 戰情快報】{real_today.strftime('%Y/%m/%d')}", "今日無特殊事件。")
