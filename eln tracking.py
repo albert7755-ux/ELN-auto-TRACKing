@@ -9,20 +9,24 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 # --- 設定網頁 ---
-st.set_page_config(page_title="ELN 戰情室 (Email 智慧過濾版)", layout="wide")
+st.set_page_config(page_title="ELN 智能戰情室 (自動抓價版)", layout="wide")
 
 # ==========================================
-# 🔐 雲端機密讀取 (Gmail)
+# 🔐 雲端機密讀取 (Gmail + LINE)
 # ==========================================
 try:
-    GMAIL_ACCOUNT = st.secrets["GMAIL_ACCOUNT"]
-    GMAIL_PASSWORD = st.secrets["GMAIL_PASSWORD"]
-    try:
-        ADMIN_EMAIL = st.secrets["ADMIN_EMAIL"]
-    except:
-        ADMIN_EMAIL = GMAIL_ACCOUNT 
+    # 嘗試讀取 LINE 設定
+    LINE_ACCESS_TOKEN = st.secrets.get("LINE_ACCESS_TOKEN", "")
+    MY_LINE_USER_ID = st.secrets.get("MY_LINE_USER_ID", "")
+    
+    # 嘗試讀取 Gmail 設定
+    GMAIL_ACCOUNT = st.secrets.get("GMAIL_ACCOUNT", "")
+    GMAIL_PASSWORD = st.secrets.get("GMAIL_PASSWORD", "")
+    ADMIN_EMAIL = st.secrets.get("ADMIN_EMAIL", GMAIL_ACCOUNT)
 except Exception:
-    st.error("⚠️ Secrets 設定不完整！")
+    st.error("⚠️ Secrets 設定讀取異常，部分功能可能無法使用。")
+    LINE_ACCESS_TOKEN = ""
+    MY_LINE_USER_ID = ""
     GMAIL_ACCOUNT = ""
     GMAIL_PASSWORD = ""
     ADMIN_EMAIL = ""
@@ -37,11 +41,13 @@ if 'is_sent' not in st.session_state:
 
 # --- 側邊欄 ---
 with st.sidebar:
-    st.header("✉️ 設定中心")
-    if GMAIL_ACCOUNT and GMAIL_PASSWORD:
-        st.success(f"✅ Email 設定已讀取")
-    else:
-        st.error("❌ Email 設定未完成")
+    st.header("⚙️ 設定中心")
+    
+    status_text = ""
+    if LINE_ACCESS_TOKEN: status_text += "✅ LINE 連線 OK\n"
+    if GMAIL_ACCOUNT: status_text += "✅ Email 連線 OK"
+    if not status_text: status_text = "⚠️ 未設定連線金鑰"
+    st.success(status_text)
 
     st.markdown("---")
     real_today = datetime.now()
@@ -49,39 +55,65 @@ with st.sidebar:
     st.caption("鎖定為真實日期")
 
     st.markdown("---")
-    st.header("🔔 通知過濾設定")
-    st.caption("設定此項讓您**不用刪除舊資料**，程式會自動忽略舊的事件。")
+    st.header("🔔 通知過濾")
+    st.caption("程式會自動回溯抓取交易日價格，無須手動輸入。")
     
-    # 🌟 關鍵新功能：回溯天數
-    lookback_days = st.slider("只通知幾天內發生的事件？", min_value=1, max_value=30, value=3, help="例如設為 3，表示只會通知「今天、昨天、前天」發生的 KO/到期事件。更早之前的會被忽略。")
-    
-    notify_ki_daily = st.checkbox("KI (跌破) 是否每天提醒？", value=True, help="打勾：只要股價在 KI 以下就每天發通知。\n不打勾：只在「剛跌破」的那幾天通知。")
+    lookback_days = st.slider("只通知幾天內發生的事件？", min_value=1, max_value=30, value=3)
+    notify_ki_daily = st.checkbox("KI (跌破) 是否每天提醒？", value=True)
 
-    st.info("💡 **多人發送技巧**\nExcel 的 Email 欄位可以用「逗號」分隔多人。")
+    st.info("💡 **小技巧**\n支援新版格式：自動將 `TSLA UW` 轉為 `TSLA` 並抓取交易日價格。")
 
 # --- 函數區 ---
-def send_email_gmail(to_email, subject, body_text):
-    if not GMAIL_ACCOUNT or not GMAIL_PASSWORD or not to_email:
-        return False
-    
-    if "@" not in str(to_email):
-        return False
 
+# 🌟 關鍵新增：代號清洗器 (把 Bloomberg 格式轉成 Yahoo 格式)
+def clean_ticker_symbol(ticker):
+    if pd.isna(ticker): return ""
+    t = str(ticker).strip().upper()
+    
+    # 美股：去除 UW, UN, UQ, UP
+    for suffix in [" UW", " UN", " UQ", " UP"]:
+        if t.endswith(suffix): return t.replace(suffix, "")
+    
+    # 日股：JT -> .T
+    if t.endswith(" JT"): return t.replace(" JT", ".T")
+    
+    # 台股：TT -> .TW (假設)
+    if t.endswith(" TT"): return t.replace(" TT", ".TW")
+    
+    # 港股：HK -> .HK
+    if t.endswith(" HK"): return t.replace(" HK", ".HK")
+    
+    return t
+
+def send_line_push(target_user_id, message_text):
+    if not LINE_ACCESS_TOKEN or not target_user_id: return False
+    from linebot import LineBotApi
+    from linebot.models import TextSendMessage
+    try:
+        uid = str(target_user_id).strip()
+        if not uid.startswith("U") or len(uid) < 10: return False
+        line_bot_api = LineBotApi(LINE_ACCESS_TOKEN)
+        line_bot_api.push_message(uid, TextSendMessage(text=message_text))
+        return True
+    except Exception as e:
+        print(f"LINE 發送失敗: {e}"); return False
+
+def send_email_gmail(to_email, subject, body_text):
+    if not GMAIL_ACCOUNT or not GMAIL_PASSWORD or not to_email: return False
+    if "@" not in str(to_email): return False
     try:
         msg = MIMEMultipart()
         msg['From'] = GMAIL_ACCOUNT
         msg['To'] = str(to_email).strip()
         msg['Subject'] = subject
         msg.attach(MIMEText(body_text, 'plain'))
-
         server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
         server.login(GMAIL_ACCOUNT, GMAIL_PASSWORD)
         server.send_message(msg)
         server.quit()
         return True
     except Exception as e:
-        print(f"寄信失敗 ({to_email}): {e}")
-        return False
+        print(f"Email 發送失敗: {e}"); return False
 
 def parse_nc_months(ko_type_str):
     if pd.isna(ko_type_str) or str(ko_type_str).strip() == "": return 1 
@@ -112,9 +144,9 @@ def find_col_index(columns, include_keywords, exclude_keywords=None):
     return None, None
 
 # --- 主畫面 ---
-st.title("📊 ELN 結構型商品 - Email 智慧過濾版")
+st.title("📊 ELN 智能戰情室 - 自動抓價版")
 
-uploaded_file = st.file_uploader("請上傳 Excel (舊的 KO 資料不用刪，程式會自動過濾)", type=['xlsx', 'csv'], key="uploader")
+uploaded_file = st.file_uploader("請上傳 Excel (支援新版無價格格式)", type=['xlsx', 'csv'], key="uploader")
 
 if uploaded_file:
     if st.session_state['last_processed_file'] != uploaded_file.name:
@@ -123,6 +155,7 @@ if uploaded_file:
 
 if uploaded_file is not None:
     try:
+        # 1. 讀取檔案
         try:
             df = pd.read_excel(uploaded_file, sheet_name=0, header=0, engine='openpyxl')
         except:
@@ -130,11 +163,13 @@ if uploaded_file is not None:
             df = pd.read_csv(uploaded_file)
 
         df = df.dropna(how='all')
-
+        # 簡單過濾標題行
         if df.iloc[0].astype(str).str.contains("進場價").any():
             df = df.iloc[1:].reset_index(drop=True)
+            
         cols = df.columns.tolist()
         
+        # 2. 欄位定位
         id_idx, _ = find_col_index(cols, ["債券", "代號", "id"]) or (0, "")
         strike_idx, _ = find_col_index(cols, ["strike", "執行", "履約"])
         ko_idx, _ = find_col_index(cols, ["ko", "提前"], exclude_keywords=["strike", "執行", "ki", "type"])
@@ -142,35 +177,31 @@ if uploaded_file is not None:
         ki_idx, _ = find_col_index(cols, ["ki", "下檔"], exclude_keywords=["ko", "type"])
         ki_type_idx, _ = find_col_index(cols, ["ki類型", "ki type"])
         t1_idx, _ = find_col_index(cols, ["標的1", "ticker 1"])
+        
         trade_date_idx, _ = find_col_index(cols, ["交易日"])
         issue_date_idx, _ = find_col_index(cols, ["發行日"])
         final_date_idx, _ = find_col_index(cols, ["最終", "評價"])
         maturity_date_idx, _ = find_col_index(cols, ["到期", "maturity"])
-        name_idx, _ = find_col_index(cols, ["理專", "姓名", "客戶"])
         
-        email_idx, email_col_name = find_col_index(cols, ["email", "e-mail", "mail", "信箱", "郵箱"])
+        name_idx, _ = find_col_index(cols, ["理專", "姓名", "客戶"])
+        line_id_idx, _ = find_col_index(cols, ["line_id", "lineid", "line user id", "uid"])
+        email_idx, _ = find_col_index(cols, ["email", "e-mail", "mail", "信箱"])
 
-        if email_idx is not None:
-            st.toast(f"✅ Email 欄位：{email_col_name} (支援逗號分隔)", icon="✉️")
-        else:
-            st.warning("⚠️ 找不到 Email 欄位")
-
-        if t1_idx is None or ko_idx is None:
-            st.error("❌ 嚴重錯誤：無法辨識關鍵欄位。")
+        if t1_idx is None:
+            st.error("❌ 無法辨識「標的1」欄位，請檢查 Excel 表頭。")
             st.stop()
 
+        # 3. 建立標準化資料表
         clean_df = pd.DataFrame()
         clean_df['ID'] = df.iloc[:, id_idx]
+        if name_idx is not None: clean_df['Name'] = df.iloc[:, name_idx].apply(clean_name_str)
+        else: clean_df['Name'] = "貴賓"
         
-        if name_idx is not None:
-            clean_df['Name'] = df.iloc[:, name_idx].apply(clean_name_str)
-        else:
-            clean_df['Name'] = "貴賓"
-            
-        if email_idx is not None:
-            clean_df['Email'] = df.iloc[:, email_idx].astype(str).replace('nan', '').str.strip()
-        else:
-            clean_df['Email'] = ""
+        if line_id_idx is not None: clean_df['Line_ID'] = df.iloc[:, line_id_idx].astype(str).replace('nan', '').str.strip()
+        else: clean_df['Line_ID'] = ""
+        
+        if email_idx is not None: clean_df['Email'] = df.iloc[:, email_idx].astype(str).replace('nan', '').str.strip()
+        else: clean_df['Email'] = ""
 
         clean_df['TradeDate'] = pd.to_datetime(df.iloc[:, trade_date_idx], errors='coerce') if trade_date_idx else pd.NaT
         clean_df['IssueDate'] = pd.to_datetime(df.iloc[:, issue_date_idx], errors='coerce') if issue_date_idx else pd.Timestamp.min
@@ -189,47 +220,80 @@ if uploaded_file is not None:
         clean_df['Strike_Pct'] = df.iloc[:, strike_idx].apply(clean_percentage) if strike_idx else 100.0
         clean_df['KO_Type'] = df.iloc[:, ko_type_idx] if ko_type_idx else ""
         clean_df['KI_Type'] = df.iloc[:, ki_type_idx] if ki_type_idx else "AKI"
-        
+
+        # 讀取標的 (支援最多5支)
+        # 關鍵邏輯：如果是新版格式(沒有進場價欄位)，我們要把 Initial 設為 0，稍後自動去抓
         for i in range(1, 6):
             if i == 1: tx_idx = t1_idx
             else:
                 tx_idx, _ = find_col_index(cols, [f"標的{i}"])
-                if tx_idx is None: tx_idx = t1_idx + (i-1)*2
-            if tx_idx < len(df.columns):
-                clean_df[f'T{i}_Code'] = df.iloc[:, tx_idx]
-                if tx_idx + 1 < len(df.columns): clean_df[f'T{i}_Strike'] = df.iloc[:, tx_idx + 1]
-                else: clean_df[f'T{i}_Strike'] = 0
-            else: clean_df[f'T{i}_Code'] = ""; clean_df[f'T{i}_Strike'] = 0
+                # 容錯：有時候是 標的1, 標的2... 有時候是 標的1, 標的1價格, 標的2...
+                if tx_idx is None: 
+                    # 猜測舊版格式 (標的佔2欄)
+                    possible_idx = t1_idx + (i-1)*2
+                    if possible_idx < len(df.columns): tx_idx = possible_idx
+            
+            if tx_idx is not None and tx_idx < len(df.columns):
+                # 這裡做代號清洗
+                raw_ticker = df.iloc[:, tx_idx]
+                clean_df[f'T{i}_Code'] = raw_ticker.apply(clean_ticker_symbol)
+                
+                # 嘗試找進場價 (舊版)
+                if tx_idx + 1 < len(df.columns):
+                    # 檢查下一欄是否為數字 (進場價)
+                    sample_val = df.iloc[0, tx_idx+1]
+                    try:
+                        float(sample_val) # 如果可以轉數字，當作是進場價
+                        clean_df[f'T{i}_Initial'] = pd.to_numeric(df.iloc[:, tx_idx + 1], errors='coerce').fillna(0)
+                    except:
+                        # 不能轉數字，代表下一欄可能是別的東西 (新版格式)，初始價設為 0 (等等自動抓)
+                        clean_df[f'T{i}_Initial'] = 0
+                else:
+                    clean_df[f'T{i}_Initial'] = 0
+            else:
+                clean_df[f'T{i}_Code'] = ""
+                clean_df[f'T{i}_Initial'] = 0
 
         clean_df = clean_df.dropna(subset=['ID'])
-        
+
+        # 4. 準備下載資料
         today_ts = pd.Timestamp(real_today)
-        min_issue_date = clean_df['IssueDate'].min()
-        start_date = today_ts - timedelta(days=30) if pd.isna(min_issue_date) else min(min_issue_date, today_ts - timedelta(days=14))
-            
-        st.info(f"下載美股資料... (基準日: {real_today.strftime('%Y-%m-%d')}) ☕")
+        min_trade_date = clean_df['TradeDate'].min()
         
+        # 為了抓進場價，開始時間要涵蓋最早的交易日
+        if pd.isna(min_trade_date):
+            start_download_date = today_ts - timedelta(days=30)
+        else:
+            start_download_date = min_trade_date - timedelta(days=7) # 多抓一週緩衝
+
         all_tickers = []
         for i in range(1, 6):
             if f'T{i}_Code' in clean_df.columns:
-                tickers = clean_df[f'T{i}_Code'].dropna().astype(str).unique().tolist()
-                all_tickers.extend(tickers)
-        all_tickers = [t.strip() for t in set(all_tickers) if t != 'nan' and str(t).strip() != '']
-        
-        try:
-            history_data = yf.download(all_tickers, start=start_date, end=today_ts + timedelta(days=1))['Close']
-        except:
-            st.error("美股連線失敗")
+                ts = clean_df[f'T{i}_Code'].dropna().unique().tolist()
+                all_tickers.extend([t for t in ts if t != ""])
+        all_tickers = list(set(all_tickers))
+
+        if not all_tickers:
+            st.error("❌ 找不到任何有效的標的代號。")
             st.stop()
 
-        results = []
-        admin_summary_list = [] 
-        individual_messages = [] 
+        st.info(f"⏳ 正在下載美股資料... (涵蓋範圍: {start_download_date.strftime('%Y-%m-%d')} ~ 今日)")
         
-        # 定義回溯時間點
+        try:
+            # 一次下載所有歷史資料
+            history_data = yf.download(all_tickers, start=start_download_date, end=today_ts + timedelta(days=1))['Close']
+        except Exception as e:
+            st.error(f"美股連線失敗: {e}")
+            st.stop()
+
+        # 5. 核心運算
+        results = []
+        individual_messages = [] 
+        admin_summary_list = []
         lookback_date = today_ts - timedelta(days=lookback_days)
 
         for index, row in clean_df.iterrows():
+            # 參數設定
             ko_thresh_val = row['KO_Pct'] if pd.notna(row['KO_Pct']) else 100.0
             ki_thresh_val = row['KI_Pct'] if pd.notna(row['KI_Pct']) else 60.0
             strike_thresh_val = row['Strike_Pct'] if pd.notna(row['Strike_Pct']) else 100.0
@@ -241,24 +305,53 @@ if uploaded_file is not None:
             nc_end_date = row['IssueDate'] + relativedelta(months=nc_months)
             
             assets = []
+            
+            # --- 處理每一個標的 (包含自動補抓進場價) ---
             for i in range(1, 6):
-                if f'T{i}_Code' not in row: continue
-                code = str(row[f'T{i}_Code']).strip()
-                try: initial = float(row[f'T{i}_Strike'])
-                except: initial = 0
-                if code != 'nan' and code != '' and initial > 0:
-                    assets.append({'code': code, 'initial': initial, 'strike_price': initial * strike_thresh, 'locked_ko': False, 'hit_ki': False, 'perf': 0.0, 'price': 0.0, 'ko_record': '', 'ki_record': ''})
+                code = row.get(f'T{i}_Code', "")
+                if code == "": continue
+                
+                initial = float(row.get(f'T{i}_Initial', 0))
+                
+                # 🌟 如果 Excel 沒填進場價 (==0)，則自動去抓交易日那天的收盤價
+                if initial == 0:
+                    trade_date = row['TradeDate']
+                    if pd.notna(trade_date):
+                        try:
+                            # 嘗試抓取交易日當天
+                            if len(all_tickers) == 1: s = history_data
+                            else: s = history_data[code]
+                            
+                            # 抓取該日期 (如果當天沒開盤，往後找最近的一天)
+                            # 使用 asof 或 reindex 比較複雜，這裡用簡單的 slice
+                            price_on_trade = s[s.index >= trade_date].head(1)
+                            if not price_on_trade.empty:
+                                initial = float(price_on_trade.iloc[0])
+                        except:
+                            initial = 0 # 抓不到
+                
+                if initial > 0:
+                    assets.append({
+                        'code': code, 
+                        'initial': initial, 
+                        'strike_price': initial * strike_thresh, 
+                        'locked_ko': False, 
+                        'hit_ki': False, 
+                        'perf': 0.0, 
+                        'price': 0.0,
+                        'ko_record': '',
+                        'ki_record': ''
+                    })
             
             if not assets: continue
 
-            ticker_data_source = history_data
-            
+            # --- 取得最新報價與表現 ---
             for asset in assets:
                 try:
-                    if len(all_tickers) == 1: s = ticker_data_source
-                    else:
-                        if asset['code'] in ticker_data_source.columns: s = ticker_data_source[asset['code']]
-                        else: continue
+                    if len(all_tickers) == 1: s = history_data
+                    else: s = history_data[asset['code']]
+                    
+                    # 抓最近一筆收盤價
                     valid_s = s[s.index <= today_ts].dropna()
                     if not valid_s.empty:
                         curr = float(valid_s.iloc[-1])
@@ -266,49 +359,67 @@ if uploaded_file is not None:
                         asset['perf'] = curr / asset['initial']
                 except: asset['price'] = 0
 
+            # --- 回測 (判斷 KO/KI) ---
             product_status = "Running"
             early_redemption_date = None
             is_aki = "AKI" in str(row['KI_Type']).upper()
-            
+
+            # 只有當已經發行後才開始回測
             if row['IssueDate'] <= today_ts:
-                backtest_data = ticker_data_source[(ticker_data_source.index >= row['IssueDate']) & (ticker_data_source.index <= today_ts)]
+                # 取得發行日到今天的數據
+                backtest_data = history_data[(history_data.index >= row['IssueDate']) & (history_data.index <= today_ts)]
+                
                 if not backtest_data.empty:
                     for date, prices in backtest_data.iterrows():
                         if product_status == "Early Redemption": break
+                        
                         is_post_nc = date >= nc_end_date
                         all_locked = True
+                        
                         for asset in assets:
+                            # 取得當日價格
                             try:
                                 if len(all_tickers) == 1: price = float(prices)
                                 else: price = float(prices[asset['code']])
                             except: price = float('nan')
+                            
                             if pd.isna(price) or price == 0:
                                 if not asset['locked_ko']: all_locked = False
                                 continue
+                            
                             perf = price / asset['initial']
                             date_str = date.strftime('%Y/%m/%d')
+                            
+                            # 檢查 KI (AKI: 每天觀察)
                             if is_aki and perf < ki_thresh:
                                 if not asset['hit_ki']:
                                     asset['hit_ki'] = True
                                     asset['ki_record'] = f"@{price:.2f} ({date_str})"
+                            
+                            # 檢查 KO (過了 NC 且每天觀察 Daily)
+                            # 注意：這裡簡化假設是 Daily Memory。如果是 Monthly 需另外判斷日期。
                             if not asset['locked_ko']:
                                 if is_post_nc and perf >= ko_thresh:
                                     asset['locked_ko'] = True 
                                     asset['ko_record'] = f"@{price:.2f} ({date_str})"
+                            
                             if not asset['locked_ko']: all_locked = False
+                        
+                        # 如果當天所有標的都 Lock KO -> 出場
                         if all_locked:
                             product_status = "Early Redemption"
                             early_redemption_date = date
 
+            # --- 整理輸出資訊 ---
             locked_list = []; waiting_list = []; hit_ki_list = []; shadow_ko_list = []
             detail_cols = {}
             asset_detail_str = "" 
 
             for i, asset in enumerate(assets):
+                # EKI 判斷 (到期當天 KI)
                 if asset['price'] > 0:
                     if not is_aki and asset['perf'] < ki_thresh: 
-                        asset['hit_ki'] = True
-                        asset['ki_record'] = f"@{asset['price']:.2f} (EKI)"
+                        asset['hit_ki'] = True # 暫時標記為破 KI (如果是到期日會真的算破)
                     if asset['perf'] >= ko_thresh and not asset['locked_ko']:
                         shadow_ko_list.append(asset['code'])
 
@@ -318,14 +429,17 @@ if uploaded_file is not None:
                 
                 p_pct = round(asset['perf']*100, 2) if asset['price'] > 0 else 0.0
                 status_icon = "✅" if asset['locked_ko'] else "⚠️" if asset['hit_ki'] else ""
-                price_display = round(asset['price'], 2) if asset['price'] > 0 else "N/A"
                 
-                cell_text = f"【{asset['code']}】\n原: {asset['initial']}\n現: {price_display}\n({p_pct}%) {status_icon}"
+                # 顯示資訊：代號 / 進場價 / 現價
+                price_display = round(asset['price'], 2) if asset['price'] > 0 else "N/A"
+                initial_display = round(asset['initial'], 2)
+                
+                cell_text = f"【{asset['code']}】\n原: {initial_display}\n現: {price_display}\n({p_pct}%) {status_icon}"
                 if asset['locked_ko']: cell_text += f"\nKO {asset['ko_record']}"
                 if asset['hit_ki']: cell_text += f"\nKI {asset['ki_record']}"
                 detail_cols[f"T{i+1}_Detail"] = cell_text
                 
-                asset_detail_str += f"{asset['code']}: {p_pct}% {status_icon}\n"
+                asset_detail_str += f"{asset['code']}: {p_pct}% {status_icon} (原:{initial_display})\n"
 
             hit_any_ki = any(a['hit_ki'] for a in assets)
             all_above_strike_now = all((a['perf'] >= strike_thresh if a['price'] > 0 else False) for a in assets)
@@ -340,106 +454,94 @@ if uploaded_file is not None:
             
             final_status = ""
             line_status_short = "" 
-            
-            # 🌟 這裡加入「是否需要通知」的過濾邏輯
             need_notify = False
 
+            # 狀態判定邏輯
             if today_ts < row['IssueDate']:
                 final_status = "⏳ 未發行"
             elif product_status == "Early Redemption":
-                # KO 邏輯
                 final_status = f"🎉 提前出場\n({early_redemption_date.strftime('%Y-%m-%d')})"
+                # 檢查是否為「新」事件
                 if early_redemption_date >= lookback_date:
                     line_status_short = "🎉 恭喜！已提前出場 (KO)"
                     need_notify = True
                 else:
                     line_status_short = f"🎉 已於 {early_redemption_date.strftime('%Y-%m-%d')} 提前出場 (舊)"
                     need_notify = False
-                    
             elif pd.notna(row['ValuationDate']) and today_ts >= row['ValuationDate']:
-                # 到期邏輯
-                is_recent_maturity = row['ValuationDate'] >= lookback_date
-                
+                # 到期
+                is_recent = row['ValuationDate'] >= lookback_date
                 if all_above_strike_now:
-                     final_status = "💰 到期獲利\n(全數 > 執行價)"
+                     final_status = "💰 到期獲利"
                      line_status_short = "💰 到期獲利"
                 elif hit_any_ki:
                      final_status = f"😭 到期接股"
                      line_status_short = f"😭 到期接股 (Worst: {worst_code})"
                 else:
-                     final_status = "🛡️ 到期保本\n(未破KI)"
+                     final_status = "🛡️ 到期保本"
                      line_status_short = "🛡️ 到期保本"
                 
-                if is_recent_maturity:
-                    need_notify = True
-                else:
-                    line_status_short += " (舊)"
-                    need_notify = False
-
+                need_notify = is_recent
+                if not is_recent: line_status_short += " (舊)"
             else:
                 # 執行中
                 if today_ts < nc_end_date:
                     final_status = f"🔒 NC閉鎖期\n(至 {nc_end_date.strftime('%Y-%m-%d')})"
-                    if shadow_ko_list: final_status += f"\n(目前 {len(shadow_ko_list)} 支 > KO價)"
                 else:
-                    if not waiting_list: final_status = "👀 比價中"
-                    else:
-                        wait_str = ",".join(waiting_list)
-                        final_status = f"👀 比價中\n⏳等待: {wait_str}"
-                        if locked_list: final_status += f"\n✅已鎖: {','.join(locked_list)}"
+                    wait_str = ",".join(waiting_list) if waiting_list else "無"
+                    final_status = f"👀 比價中"
                 
                 if hit_any_ki:
                     final_status += f"\n⚠️ KI已破: {','.join(hit_ki_list)}"
                     line_status_short = f"⚠️ 注意：KI 已跌破 ({','.join(hit_ki_list)})"
-                    if notify_ki_daily:
-                        need_notify = True
-                    else:
-                        need_notify = False 
+                    need_notify = notify_ki_daily
 
             if line_status_short:
                 admin_summary_list.append(f"● {row['ID']} ({row['Name']}): {line_status_short}")
+
+            # 收集發送名單
+            line_ids = [x.strip() for x in re.split(r'[;,，]', str(row.get('Line_ID', ''))) if x.strip()]
+            emails = [x.strip() for x in re.split(r'[;,，]', str(row.get('Email', ''))) if x.strip()]
             
-            # 🚀 決定是否發送個別通知 (Email)
-            target_emails = row.get('Email', '')
-            email_list = [x.strip() for x in re.split(r'[;,，]', str(target_emails)) if x.strip()]
-            
-            # 只有當 need_notify = True 時，才把訊息加入寄送清單
-            if email_list and line_status_short and need_notify:
-                subject = f"【ELN通知】{row['ID']} 最新狀態通知"
-                msg = (f"Hi {row['Name']} 您好，\n\n"
-                       f"您的結構型商品 {row['ID']} 最新狀態如下：\n"
-                       f"--------------------------------\n"
-                       f"【{line_status_short}】\n\n"
-                       f"{asset_detail_str}\n"
-                       f"📅 到期日: {mat_date_str}\n"
-                       f"--------------------------------\n"
-                       f"貼心通知\n"
-                       f"(本信件由系統自動發送，請勿直接回覆)")
+            common_msg_body = (
+                f"Hi {row['Name']} 您好，\n"
+                f"您的結構型商品 {row['ID']} 最新狀態：\n\n"
+                f"【{line_status_short}】\n\n"
+                f"{asset_detail_str}"
+                f"📅 到期日: {row['MaturityDate'].strftime('%Y-%m-%d') if pd.notna(row['MaturityDate']) else '-'}\n"
+                f"------------------\n"
+                f"貼心通知"
+            )
+
+            if need_notify and line_status_short:
+                # LINE
+                for uid in line_ids:
+                    if uid.startswith("U") or uid.startswith("C"):
+                        individual_messages.append({'type': 'line', 'target': uid, 'msg': common_msg_body})
                 
-                for mail in email_list:
+                # Email
+                for mail in emails:
                     if "@" in mail:
-                        individual_messages.append( (mail, subject, msg) )
+                        subject = f"【ELN通知】{row['ID']} 最新狀態"
+                        mail_body = common_msg_body + "\n(本信件由系統自動發送)"
+                        individual_messages.append({'type': 'email', 'target': mail, 'subj': subject, 'msg': mail_body})
 
-            trade_date_str = row['TradeDate'].strftime('%Y-%m-%d') if pd.notna(row['TradeDate']) else "-"
-            issue_date_str = row['IssueDate'].strftime('%Y-%m-%d') if pd.notna(row['IssueDate']) else "-"
-            val_date_str = row['ValuationDate'].strftime('%Y-%m-%d') if pd.notna(row['ValuationDate']) else "-"
-            mat_date_str = row['MaturityDate'].strftime('%Y-%m-%d') if pd.notna(row['MaturityDate']) else "-"
-
+            # 收集結果到 DataFrame
             row_res = {
-                "債券代號": row['ID'], "Email": target_emails, "天期": row['Tenure'], "收件人": row['Name'],
+                "債券代號": row['ID'], "Name": row['Name'],
                 "狀態": final_status, "最差表現": f"{round(worst_perf*100, 2)}%",
-                "KO設定": f"{ko_thresh_val}%", "KI設定": f"{ki_thresh_val}%", "執行價": f"{strike_thresh_val}%",
-                "交易日": trade_date_str, "發行日": issue_date_str, "最終評價": val_date_str, "到期日": mat_date_str
+                "交易日": row['TradeDate'].strftime('%Y-%m-%d') if pd.notna(row['TradeDate']) else "-"
             }
             row_res.update(detail_cols)
             results.append(row_res)
 
+        # 6. 顯示與操作
         if not results:
             st.warning("⚠️ 無資料")
         else:
             final_df = pd.DataFrame(results)
-            st.subheader("📋 專業監控列表")
             
+            # 設定顏色
             def color_status(val):
                 if "提前" in str(val) or "獲利" in str(val): return 'background-color: #d4edda; color: green'
                 if "接股" in str(val) or "KI" in str(val): return 'background-color: #f8d7da; color: red'
@@ -447,69 +549,46 @@ if uploaded_file is not None:
                 return ''
 
             t_cols = [c for c in final_df.columns if '_Detail' in c]; t_cols.sort()
-            display_cols = ['債券代號', '天期', '狀態', '最差表現'] + t_cols + ['Email', 'KO設定', 'KI設定', '執行價', '交易日', '發行日', '最終評價', '到期日']
-            column_config = {
-                "狀態": st.column_config.TextColumn("目前狀態摘要", width="large"),
-                "Email": st.column_config.TextColumn("Emails", width="medium"),
-                "債券代號": st.column_config.TextColumn("代號", width="small"),
-                "天期": st.column_config.TextColumn("天期", width="small"),
-                "KO設定": st.column_config.TextColumn("KO", width="small"),
-                "KI設定": st.column_config.TextColumn("KI", width="small"),
-                "執行價": st.column_config.TextColumn("Strike", width="small"),
-                "最差表現": st.column_config.TextColumn("Worst Of", width="small"),
-            }
-            for i, c in enumerate(t_cols): column_config[c] = st.column_config.TextColumn(f"標的 {i+1} (原始/現價/狀態)", width="large")
-
-            st.dataframe(final_df[display_cols].style.applymap(color_status, subset=['狀態']), use_container_width=True, column_config=column_config, height=600, hide_index=True)
+            display_cols = ['債券代號', 'Name', '狀態', '最差表現'] + t_cols + ['交易日']
             
+            st.subheader("📋 監控列表")
+            st.dataframe(final_df[display_cols].style.applymap(color_status, subset=['狀態']), height=600, use_container_width=True)
+
             st.markdown("### 📢 發送操作")
             
             if st.session_state['is_sent']:
-                st.success("✅ 本次檔案已發送完成！")
-                if st.button("🔄 重置狀態 (讓我再發一次)"):
+                st.success("✅ 發送完成！")
+                if st.button("🔄 重置"):
                     st.session_state['is_sent'] = False
                     st.rerun()
             else:
-                btn_label = f"📧 發送 Email 通知 (預計: {len(individual_messages)} 位收件者 + 1 位管理員)"
-                st.caption(f"ℹ️ 根據左側設定，目前只發送 **過去 {lookback_days} 天內** 的新事件。")
-
+                count = len(individual_messages)
+                btn_label = f"🚀 發送通知 (預計: {count} 則)"
+                
                 if st.button(btn_label, type="primary"):
-                    success_count = 0
+                    success_cnt = 0
+                    bar = st.progress(0, text="發送中...")
                     
-                    progress_text = "正在寄送客戶通知..."
-                    my_bar = st.progress(0, text=progress_text)
+                    for idx, item in enumerate(individual_messages):
+                        res = False
+                        if item['type'] == 'line':
+                            res = send_line_push(item['target'], item['msg'])
+                        elif item['type'] == 'email':
+                            res = send_email_gmail(item['target'], item['subj'], item['msg'])
+                        
+                        if res: success_cnt += 1
+                        bar.progress((idx+1)/count)
                     
-                    total_msgs = len(individual_messages)
-                    if total_msgs == 0:
-                        my_bar.empty()
-                        st.info("👀 經檢查，今天沒有「新發生的」通知需要發送。")
-                    else:
-                        for idx, (mail, subj, body) in enumerate(individual_messages):
-                            if send_email_gmail(mail, subj, body):
-                                success_count += 1
-                            if total_msgs > 0:
-                                my_bar.progress((idx + 1) / total_msgs, text=f"發送中... ({idx+1}/{total_msgs})")
-                        my_bar.empty()
+                    bar.empty()
                     
-                    if admin_summary_list:
-                        admin_subject = f"【ELN 戰情快報 (管理員)】 {real_today.strftime('%Y/%m/%d')}"
-                        admin_body = f"今日摘要報告：\n----------------\n" + "\n".join(admin_summary_list)
-                        if success_count > 0:
-                            admin_body += f"\n\n(已另行發送 {success_count} 封「新事件」信件)"
-                        else:
-                            admin_body += f"\n\n(今日無新事件，未發送個別信件)"
-                        send_email_gmail(ADMIN_EMAIL, admin_subject, admin_body)
-                    else:
-                         send_email_gmail(ADMIN_EMAIL, f"【ELN 戰情快報】{real_today.strftime('%Y/%m/%d')}", "今日無特殊事件。")
-                    
+                    # 發送給管理員 (LINE)
+                    if admin_summary_list and MY_LINE_USER_ID:
+                        summary = "【ELN 戰情快報】\n" + "\n".join(admin_summary_list)
+                        send_line_push(MY_LINE_USER_ID, summary)
+
                     st.session_state['is_sent'] = True
-                    if success_count > 0:
-                        st.success(f"🎉 發送完畢！成功寄出 {success_count} 封客戶信件。")
-                        st.balloons()
-                    else:
-                        st.success("✅ 檢查完畢，沒有新的通知需要發送。")
+                    st.success(f"🎉 成功發送 {success_cnt} 則通知！")
+                    st.balloons()
 
     except Exception as e:
         st.error(f"發生錯誤：{e}")
-else:
-    st.info("👆 請上傳 Excel (含 Email 欄位)")
