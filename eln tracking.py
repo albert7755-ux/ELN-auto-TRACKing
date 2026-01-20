@@ -50,17 +50,21 @@ with st.sidebar:
     st.markdown("---")
     st.header("🔔 通知過濾")
     lookback_days = st.slider("只通知幾天內發生的事件？", min_value=1, max_value=30, value=3)
-    notify_ki_daily = st.checkbox("KI/DRA 是否每天提醒？", value=True, help="打勾：持續跌破期間每天都會通知。\n不打勾：只在剛發生的那幾天通知。")
+    notify_ki_daily = st.checkbox("KI/DRA 是否每天提醒？", value=True, help="打勾：持續跌破/暫停計息期間每天都會通知。")
 
-    st.info("💡 **Email 版功能**\n✅ DRA 每日計息支援\n✅ NC 智慧判讀\n✅ 自動抓價與日期推算\n✅ 管理員摘要優先寄送")
+    st.info("💡 **Email 版功能**\n✅ UNH/US 代號修復\n✅ DRA 每日計息支援\n✅ NC 智慧判讀\n✅ 管理員摘要優先發送")
 
 # --- 函數區 ---
 
+# 🌟 [修復版] 代號清洗器 (支援 US 結尾)
 def clean_ticker_symbol(ticker):
     if pd.isna(ticker): return ""
     t = str(ticker).strip().upper()
-    for suffix in [" UW", " UN", " UQ", " UP"]: 
-        if t.endswith(suffix): return t.replace(suffix, "")
+    
+    # 使用 Regex 移除美股常見後綴 (包含 US)
+    t = re.sub(r'\s+(UW|UN|UQ|UP|US)$', '', t)
+    
+    # 其他國家後綴轉換
     if t.endswith(" JT"): return t.replace(" JT", ".T") 
     if t.endswith(" TT"): return t.replace(" TT", ".TW") 
     if t.endswith(" HK"): return t.replace(" HK", ".HK") 
@@ -135,9 +139,10 @@ def clean_name_str(val):
     if s.lower() == 'nan' or s == "": return "貴賓"
     return s
 
+# 🌟 升級版欄位搜尋 (無視空格)
 def find_col_index(columns, include_keywords, exclude_keywords=None):
     for idx, col_name in enumerate(columns):
-        col_str = str(col_name).strip().lower()
+        col_str = str(col_name).strip().lower().replace(" ", "")
         if exclude_keywords:
             if any(ex in col_str for ex in exclude_keywords): continue
         if any(inc in col_str for inc in include_keywords):
@@ -170,13 +175,13 @@ if uploaded_file is not None:
         
         # 欄位定位
         id_idx, _ = find_col_index(cols, ["債券", "代號", "id", "商品代號"]) or (0, "")
-        type_idx, _ = find_col_index(cols, ["商品類型", "Product Type", "type"], exclude_keywords=["ko", "ki"]) 
+        type_idx, _ = find_col_index(cols, ["商品類型", "ProductType", "type"], exclude_keywords=["ko", "ki"]) 
         strike_idx, _ = find_col_index(cols, ["strike", "執行", "履約"])
         ko_idx, _ = find_col_index(cols, ["ko", "提前"], exclude_keywords=["strike", "執行", "ki", "type"])
-        ko_type_idx, _ = find_col_index(cols, ["ko類型", "ko type"]) or find_col_index(cols, ["類型", "type"], exclude_keywords=["ki", "ko", "商品"])
+        ko_type_idx, _ = find_col_index(cols, ["ko類型", "kotype"]) or find_col_index(cols, ["類型", "type"], exclude_keywords=["ki", "ko", "商品"])
         ki_idx, _ = find_col_index(cols, ["ki", "下檔"], exclude_keywords=["ko", "type"])
-        ki_type_idx, _ = find_col_index(cols, ["ki類型", "ki type"])
-        t1_idx, _ = find_col_index(cols, ["標的1", "ticker 1"])
+        ki_type_idx, _ = find_col_index(cols, ["ki類型", "kitype"])
+        t1_idx, _ = find_col_index(cols, ["標的1", "ticker1"])
         
         trade_date_idx, _ = find_col_index(cols, ["交易日"])
         issue_date_idx, _ = find_col_index(cols, ["發行日"])
@@ -185,20 +190,27 @@ if uploaded_file is not None:
         tenure_idx, _ = find_col_index(cols, ["天期", "term", "tenure"])
         
         name_idx, _ = find_col_index(cols, ["理專", "姓名", "客戶"])
-        email_idx, _ = find_col_index(cols, ["email", "e-mail", "mail", "信箱"])
+        email_idx, email_col_name = find_col_index(cols, ["email", "e-mail", "mail", "信箱"])
+
+        if email_idx is not None:
+            st.toast(f"✅ 成功辨識 Email 欄位: {email_col_name}", icon="✉️")
 
         if t1_idx is None:
             st.error("❌ 無法辨識「標的1」欄位，請檢查 Excel 表頭。")
             st.stop()
 
+        # 建立資料表
         clean_df = pd.DataFrame()
         clean_df['ID'] = df.iloc[:, id_idx]
         if name_idx is not None: clean_df['Name'] = df.iloc[:, name_idx].apply(clean_name_str)
         else: clean_df['Name'] = "貴賓"
-        if email_idx is not None: clean_df['Email'] = df.iloc[:, email_idx].astype(str).replace('nan', '').str.strip()
-        else: clean_df['Email'] = ""
         
-        # 抓取商品類型 (FCN / DRA)
+        if email_idx is not None: 
+            clean_df['Email'] = df.iloc[:, email_idx].astype(str).replace('nan', '').str.strip()
+        else: 
+            clean_df['Email'] = ""
+        
+        # 抓取商品類型
         if type_idx is not None:
             clean_df['Product_Type'] = df.iloc[:, type_idx].astype(str).fillna("FCN")
         else:
@@ -207,13 +219,13 @@ if uploaded_file is not None:
         clean_df['TradeDate'] = pd.to_datetime(df.iloc[:, trade_date_idx], errors='coerce') if trade_date_idx else pd.NaT
         clean_df['IssueDate'] = pd.to_datetime(df.iloc[:, issue_date_idx], errors='coerce') if issue_date_idx else pd.Timestamp.min
         
-        # 處理日期 (自動推算)
         if maturity_date_idx: clean_df['MaturityDate'] = pd.to_datetime(df.iloc[:, maturity_date_idx], errors='coerce')
         else: clean_df['MaturityDate'] = pd.NaT
             
         clean_df['ValuationDate'] = pd.to_datetime(df.iloc[:, final_date_idx], errors='coerce') if final_date_idx else pd.NaT
         clean_df['TenureStr'] = df.iloc[:, tenure_idx] if tenure_idx else ""
 
+        # 自動推算日期
         for idx, row in clean_df.iterrows():
             if pd.isna(row['MaturityDate']):
                 calc_date = calculate_maturity(row, 'IssueDate', 'TenureStr')
@@ -228,7 +240,7 @@ if uploaded_file is not None:
             return "-"
         clean_df['Tenure'] = clean_df.apply(calc_tenure_display, axis=1)
 
-        # 處理百分比與參數
+        # 參數處理
         clean_df['KO_Pct'] = df.iloc[:, ko_idx].apply(clean_percentage)
         clean_df['KI_Pct'] = df.iloc[:, ki_idx].apply(clean_percentage)
         clean_df['Strike_Pct'] = df.iloc[:, strike_idx].apply(clean_percentage) if strike_idx else 100.0
@@ -236,7 +248,7 @@ if uploaded_file is not None:
         clean_df['KO_Type'] = df.iloc[:, ko_type_idx] if ko_type_idx else "NC1" 
         clean_df['KI_Type'] = df.iloc[:, ki_type_idx] if ki_type_idx else "AKI"
 
-        # 讀取標的代號與初始價
+        # 標的代號與初始價處理
         for i in range(1, 6):
             if i == 1: tx_idx = t1_idx
             else:
@@ -249,7 +261,7 @@ if uploaded_file is not None:
                 raw_ticker = df.iloc[:, tx_idx]
                 clean_df[f'T{i}_Code'] = raw_ticker.apply(clean_ticker_symbol)
                 
-                # 嘗試讀取價格，若無則設為 0 (稍後自動抓)
+                # 自動補價邏輯
                 if tx_idx + 1 < len(df.columns):
                     sample_val = df.iloc[0, tx_idx+1]
                     try:
@@ -291,7 +303,7 @@ if uploaded_file is not None:
             st.error(f"美股連線失敗: {e}")
             st.stop()
 
-        # 5. 核心運算 (Backtest)
+        # 5. 核心運算
         results = []
         individual_messages = [] 
         admin_summary_list = []
@@ -312,7 +324,7 @@ if uploaded_file is not None:
             
             assets = []
             
-            # 標的初始化與自動補價
+            # 填入標的與自動抓價
             for i in range(1, 6):
                 code = row.get(f'T{i}_Code', "")
                 if code == "": continue
@@ -339,7 +351,7 @@ if uploaded_file is not None:
             
             if not assets: continue
 
-            # 取得現價
+            # 抓現價
             for asset in assets:
                 try:
                     if len(all_tickers) == 1: s = history_data
@@ -355,7 +367,7 @@ if uploaded_file is not None:
             early_redemption_date = None
             is_aki = "AKI" in str(row['KI_Type']).upper()
 
-            # 回測邏輯
+            # 回測
             if row['IssueDate'] <= today_ts:
                 backtest_data = history_data[(history_data.index >= row['IssueDate']) & (history_data.index <= today_ts)]
                 if not backtest_data.empty:
@@ -390,7 +402,7 @@ if uploaded_file is not None:
                             product_status = "Early Redemption"
                             early_redemption_date = date
 
-            locked_list = []; waiting_list = []; hit_ki_list = []
+            locked_list = []; waiting_list = []; hit_ki_list = []; shadow_ko_list = []
             detail_cols = {}
             asset_detail_str = "" 
             any_below_strike_today = False
@@ -485,7 +497,6 @@ if uploaded_file is not None:
             if line_status_short:
                 admin_summary_list.append(f"● {row['ID']} ({row['Name']}): {line_status_short}")
 
-            # Email 發送名單準備
             emails = [x.strip() for x in re.split(r'[;,，]', str(row.get('Email', ''))) if x.strip()]
             
             mat_date_str = row['MaturityDate'].strftime('%Y-%m-%d') if pd.notna(row['MaturityDate']) else "-"
@@ -504,7 +515,7 @@ if uploaded_file is not None:
                     if "@" in mail:
                         subject = f"【ELN通知】{row['ID']} 最新狀態"
                         mail_body = common_msg_body + "\n(本信件由系統自動發送)"
-                        individual_messages.append({'email': mail, 'subj': subject, 'msg': mail_body})
+                        individual_messages.append({'target': mail, 'subj': subject, 'msg': mail_body})
 
             row_res = {
                 "債券代號": row['ID'], "Name": row['Name'], "Type": row['Product_Type'],
@@ -560,7 +571,7 @@ if uploaded_file is not None:
                     bar = st.progress(0, text="正在寄送客戶通知...")
                     
                     for idx, item in enumerate(individual_messages):
-                        if send_email_gmail(item['email'], item['subj'], item['msg']):
+                        if send_email_gmail(item['target'], item['subj'], item['msg']):
                             success_cnt += 1
                         bar.progress((idx+1)/count)
                     
