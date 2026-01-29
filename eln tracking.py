@@ -411,4 +411,192 @@ if uploaded_file is not None:
                     if asset['perf'] < strike_thresh: status_icon += "🛑無息"
                     else: status_icon += "💸"
 
-                price_display = round(asset['price'], 2) if
+                price_display = round(asset['price'], 2) if asset['price'] > 0 else "N/A"
+                initial_display = round(asset['initial'], 2)
+                
+                # Streamlit 顯示用
+                cell_text = f"【{asset['code']}】\n原: {initial_display}\n現: {price_display}\n({p_pct}%) {status_icon}"
+                if asset['locked_ko']: cell_text += f"\nKO {asset['ko_record']}"
+                if asset['hit_ki']: cell_text += f"\nKI {asset['ki_record']}"
+                detail_cols[f"T{i+1}_Detail"] = cell_text
+
+                # 📧 Email HTML 表格行製作
+                row_style = ""
+                if asset['hit_ki'] or asset['eki_risk'] or (is_dra and asset['perf'] < strike_thresh):
+                    row_style = "color: red; font-weight: bold;"
+                elif asset['locked_ko']:
+                    row_style = "color: green; font-weight: bold;"
+                
+                asset_rows_html += f"""
+                <tr>
+                    <td style="border: 1px solid #ddd; padding: 8px;">{asset['code']}</td>
+                    <td style="border: 1px solid #ddd; padding: 8px;">{initial_display}</td>
+                    <td style="border: 1px solid #ddd; padding: 8px;">{price_display}</td>
+                    <td style="border: 1px solid #ddd; padding: 8px; {row_style}">{p_pct}% {status_icon}</td>
+                </tr>
+                """
+
+            hit_any_ki = any(a['hit_ki'] for a in assets)
+            all_above_strike_now = all((a['perf'] >= strike_thresh if a['price'] > 0 else False) for a in assets)
+            valid_assets = [a for a in assets if a['perf'] > 0]
+            if valid_assets: worst_perf = min(valid_assets, key=lambda x: x['perf'])['perf']
+            else: worst_perf = 0
+            
+            status_msgs = []
+            line_status_short = ""
+            need_notify = False
+            title_color = "#333333" # 預設標題色
+
+            if today_ts < row['IssueDate']:
+                status_msgs.append("⏳ 未發行")
+            elif product_status == "Early Redemption":
+                status_msgs.append(f"🎉 提前出場 ({early_redemption_date.strftime('%Y-%m-%d')})")
+                if early_redemption_date >= lookback_date:
+                    line_status_short = "🎉 恭喜！已提前出場 (KO)"
+                    title_color = "green"
+                    need_notify = True
+            elif pd.notna(row['ValuationDate']) and today_ts >= row['ValuationDate']:
+                final_hit_ki = False
+                for a in assets:
+                     if a['perf'] < ki_thresh: final_hit_ki = True
+                if all_above_strike_now:
+                     status_msgs.append("💰 到期獲利")
+                     line_status_short = "💰 到期獲利"
+                     title_color = "green"
+                elif final_hit_ki:
+                     status_msgs.append("😭 到期接股")
+                     line_status_short = "😭 到期接股"
+                     title_color = "red"
+                else:
+                     status_msgs.append("🛡️ 到期保本")
+                     line_status_short = "🛡️ 到期保本"
+                if row['ValuationDate'] >= lookback_date: need_notify = True
+            else:
+                if today_ts < nc_end_date:
+                    status_msgs.append(f"🔒 NC閉鎖期 (至 {nc_end_date.strftime('%Y-%m-%d')})")
+                else:
+                    if is_period_end: status_msgs.append(f"👀 比價中 (月月比)")
+                    else: status_msgs.append("👀 比價中 (Daily)")
+                
+                if ko_step_val > 0: status_msgs.append(f"📉 目前KO門檻: {current_ko_pct}%")
+
+                if hit_any_ki:
+                    status_msgs.insert(0, f"☠️ 已跌破KI ({','.join(hit_ki_list)})")
+                    line_status_short = f"⚠️ 警告：已跌破 KI ({','.join(hit_ki_list)})"
+                    title_color = "red"
+                    need_notify = True 
+                elif any_eki_risk_today:
+                     status_msgs.insert(0, f"📉 市價低於KI (EKI觀察中)")
+
+                if is_dra:
+                    if any_below_strike_today:
+                        status_msgs.append(f"🛑 DRA暫停計息 ({','.join(dra_fail_list)})")
+                        if notify_ki_daily:
+                            if not line_status_short: line_status_short = f"🛑 DRA 暫停計息"
+                            else: line_status_short += f" & 🛑 DRA 暫停"
+                            title_color = "red"
+                            need_notify = True
+                    else: status_msgs.append("💸 DRA計息中")
+
+            final_status = "\n".join(status_msgs)
+
+            target_email = row.get('Email', '')
+            mat_date_str = row['MaturityDate'].strftime('%Y-%m-%d') if pd.notna(row['MaturityDate']) else "-"
+            
+            # 📧 HTML Email 內容組裝
+            email_subject = f"【ELN通知】{row['ID']} - {line_status_short}" if line_status_short else f"【ELN週報】{row['ID']} 狀態報告"
+            
+            email_html_body = f"""
+            <html>
+            <body>
+                <h3>Hi {row['Name']} 您好，</h3>
+                <p>您的結構型商品 <b>{row['ID']}</b> ({row['Product_Type']}) 最新狀態如下：</p>
+                
+                <h2 style="color: {title_color};">{line_status_short}</h2>
+                
+                <p><b>詳細標的表現：</b></p>
+                <table style="border-collapse: collapse; width: 100%;">
+                    <tr style="background-color: #f2f2f2;">
+                        <th style="border: 1px solid #ddd; padding: 8px;">代號</th>
+                        <th style="border: 1px solid #ddd; padding: 8px;">進場價</th>
+                        <th style="border: 1px solid #ddd; padding: 8px;">現價</th>
+                        <th style="border: 1px solid #ddd; padding: 8px;">表現</th>
+                    </tr>
+                    {asset_rows_html}
+                </table>
+                
+                <br>
+                <p>📅 <b>到期日：</b> {mat_date_str}</p>
+                <hr>
+                <p style="font-size: 12px; color: gray;">此郵件為系統自動發送，請勿直接回覆。</p>
+            </body>
+            </html>
+            """
+
+            if need_notify and line_status_short and target_email and "@" in str(target_email):
+                individual_messages.append({
+                    'target': target_email, 
+                    'subject': email_subject, 
+                    'html': email_html_body
+                })
+
+            row_res = {
+                "債券代號": row['ID'], "Name": row['Name'], "Type": row['Product_Type'],
+                "狀態": final_status, "最差表現": f"{round(worst_perf*100, 2)}%",
+                "交易日": row['TradeDate'].strftime('%Y-%m-%d') if pd.notna(row['TradeDate']) else "-",
+                "NC月份": f"{nc_months}M",
+                "KO設定": f"{ko_initial_val}% (-{ko_step_val}%)" if ko_step_val > 0 else f"{ko_initial_val}%"
+            }
+            row_res.update(detail_cols)
+            results.append(row_res)
+
+        if not results:
+            st.warning("⚠️ 無資料")
+        else:
+            final_df = pd.DataFrame(results)
+            def color_status(val):
+                s = str(val)
+                if "跌破KI" in s or "接股" in s: return 'background-color: #f8d7da; color: red; font-weight: bold'
+                if "EKI觀察中" in s or "暫停" in s: return 'background-color: #fff3cd; color: #856404'
+                if "提前" in s or "獲利" in s or "計息中" in s: return 'background-color: #d4edda; color: green'
+                return ''
+
+            t_cols = [c for c in final_df.columns if '_Detail' in c]; t_cols.sort()
+            display_cols = ['債券代號', 'Type', 'Name', '狀態', 'KO設定', '最差表現'] + t_cols + ['交易日']
+            
+            st.subheader("📋 監控列表")
+            st.dataframe(final_df[display_cols].style.applymap(color_status, subset=['狀態']), height=600, use_container_width=True)
+
+            st.markdown("### 📧 信件發送操作")
+            
+            secrets_ok = (SENDER_EMAIL != "" and SENDER_PASSWORD != "")
+
+            if not secrets_ok:
+                st.error("⚠️ 未設定 Email 帳號密碼，無法發送信件。請設定 Secrets。")
+            
+            if st.session_state['is_sent']:
+                st.success("✅ 發送完成！")
+                if st.button("🔄 重置"):
+                    st.session_state['is_sent'] = False
+                    st.rerun()
+            else:
+                count = len(individual_messages)
+                btn_label = f"🚀 發送 Email 通知 (預計: {count} 封)"
+                
+                if st.button(btn_label, type="primary", disabled=not secrets_ok):
+                    if count == 0:
+                        st.warning("沒有需要通知的事件。")
+                    else:
+                        success_cnt = 0
+                        bar = st.progress(0, text="正在發送信件...")
+                        for idx, item in enumerate(individual_messages):
+                            if send_email_html(item['target'], item['subject'], item['html']):
+                                success_cnt += 1
+                            bar.progress((idx+1)/count)
+                        bar.empty()
+                        st.session_state['is_sent'] = True
+                        st.success(f"🎉 成功寄出 {success_cnt} 封 Email！")
+                        st.balloons()
+
+    except Exception as e:
+        st.error(f"發生錯誤：{e}")
