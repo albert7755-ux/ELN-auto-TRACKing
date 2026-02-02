@@ -10,16 +10,16 @@ from email.header import Header
 from dateutil.relativedelta import relativedelta
 
 # --- 設定網頁 ---
-st.set_page_config(page_title="ELN 智能戰情室 (Email版)", layout="wide")
+st.set_page_config(page_title="ELN 智能戰情室 (智能樣式版)", layout="wide")
 
 # ==========================================
-# 📧 Email 伺服器設定 (從 Secrets 讀取)
+# 📧 Email 伺服器設定
 # ==========================================
 try:
-    SMTP_SERVER = st.secrets.get("SMTP_SERVER", "smtp.gmail.com") # 預設 Gmail
+    SMTP_SERVER = st.secrets.get("SMTP_SERVER", "smtp.gmail.com")
     SMTP_PORT = st.secrets.get("SMTP_PORT", 587)
     SENDER_EMAIL = st.secrets.get("SENDER_EMAIL", "")
-    SENDER_PASSWORD = st.secrets.get("SENDER_PASSWORD", "") # 應用程式密碼
+    SENDER_PASSWORD = st.secrets.get("SENDER_PASSWORD", "")
 except Exception:
     SMTP_SERVER = ""
     SMTP_PORT = 587
@@ -49,8 +49,7 @@ with st.sidebar:
     st.markdown("---")
     st.header("🔔 通知過濾")
     lookback_days = st.slider("顯示幾天內發生的事件？", min_value=1, max_value=30, value=3)
-    notify_ki_daily = st.checkbox("AKI/DRA 每天提醒？", value=True)
-    st.info("💡 **EKI 優化已啟動**：\nEKI 跌破僅標示於列表，不會發送信件干擾。")
+    st.info("💡 **樣式說明**：\n已提前出場超過 **2天** 的商品，將會自動顯示為~~刪除線~~並變灰，方便您聚焦在即將到期的案件。")
 
 # --- 函數區 ---
 
@@ -144,7 +143,7 @@ def find_col_index(columns, include_keywords, exclude_keywords=None):
     return None, None
 
 # --- 主畫面 ---
-st.title("📧 ELN 智能戰情室 - Email 專業版")
+st.title("📧 ELN 智能戰情室 - 智能樣式版")
 
 uploaded_file = st.file_uploader("請上傳 Excel", type=['xlsx', 'csv'], key="uploader")
 
@@ -166,6 +165,7 @@ if uploaded_file is not None:
             df = df.iloc[1:].reset_index(drop=True)
         cols = df.columns.tolist()
         
+        # 欄位定位
         id_idx, _ = find_col_index(cols, ["債券", "代號", "id", "商品代號"]) or (0, "")
         type_idx, _ = find_col_index(cols, ["商品類型", "ProductType", "type"], exclude_keywords=["ko", "ki"]) 
         strike_idx, _ = find_col_index(cols, ["strike", "執行", "履約"])
@@ -180,8 +180,6 @@ if uploaded_file is not None:
         maturity_date_idx, _ = find_col_index(cols, ["到期", "maturity"])
         tenure_idx, _ = find_col_index(cols, ["天期", "term", "tenure"])
         name_idx, _ = find_col_index(cols, ["理專", "姓名", "客戶"])
-        
-        # 關鍵：Email 欄位
         email_idx, _ = find_col_index(cols, ["email", "e-mail", "mail", "信箱", "電子郵件"])
 
         if t1_idx is None:
@@ -192,8 +190,6 @@ if uploaded_file is not None:
         clean_df['ID'] = df.iloc[:, id_idx]
         if name_idx is not None: clean_df['Name'] = df.iloc[:, name_idx].apply(clean_name_str)
         else: clean_df['Name'] = "貴賓"
-        
-        # 讀取 Email
         if email_idx is not None: clean_df['Email'] = df.iloc[:, email_idx].astype(str).replace('nan', '').str.strip()
         else: clean_df['Email'] = ""
 
@@ -362,11 +358,9 @@ if uploaded_file is not None:
                             
                             perf = price / asset['initial']
                             date_str = date.strftime('%Y/%m/%d')
-                            
                             if is_aki and perf < ki_thresh and not asset['hit_ki']:
                                 asset['hit_ki'] = True
                                 asset['ki_record'] = f"@{price:.2f} ({date_str})"
-                            
                             if not asset['locked_ko']:
                                 if is_post_nc:
                                     if is_period_end and not is_obs_date: pass
@@ -382,7 +376,7 @@ if uploaded_file is not None:
 
             locked_list = []; waiting_list = []; hit_ki_list = []
             detail_cols = {}
-            asset_rows_html = "" # 用來存 Email 表格的行
+            asset_rows_html = ""
             any_below_strike_today = False
             dra_fail_list = []
             any_eki_risk_today = False
@@ -414,13 +408,12 @@ if uploaded_file is not None:
                 price_display = round(asset['price'], 2) if asset['price'] > 0 else "N/A"
                 initial_display = round(asset['initial'], 2)
                 
-                # Streamlit 顯示用
                 cell_text = f"【{asset['code']}】\n原: {initial_display}\n現: {price_display}\n({p_pct}%) {status_icon}"
                 if asset['locked_ko']: cell_text += f"\nKO {asset['ko_record']}"
                 if asset['hit_ki']: cell_text += f"\nKI {asset['ki_record']}"
                 detail_cols[f"T{i+1}_Detail"] = cell_text
 
-                # 📧 Email HTML 表格行製作
+                # 📧 HTML 表格
                 row_style = ""
                 if asset['hit_ki'] or asset['eki_risk'] or (is_dra and asset['perf'] < strike_thresh):
                     row_style = "color: red; font-weight: bold;"
@@ -445,7 +438,7 @@ if uploaded_file is not None:
             status_msgs = []
             line_status_short = ""
             need_notify = False
-            title_color = "#333333" # 預設標題色
+            title_color = "#333333"
 
             if today_ts < row['IssueDate']:
                 status_msgs.append("⏳ 未發行")
@@ -491,29 +484,20 @@ if uploaded_file is not None:
                 if is_dra:
                     if any_below_strike_today:
                         status_msgs.append(f"🛑 DRA暫停計息 ({','.join(dra_fail_list)})")
-                        if notify_ki_daily:
-                            if not line_status_short: line_status_short = f"🛑 DRA 暫停計息"
-                            else: line_status_short += f" & 🛑 DRA 暫停"
-                            title_color = "red"
-                            need_notify = True
-                    else: status_msgs.append("💸 DRA計息中")
+                        status_msgs.insert(0, f"⚠️ DRA 暫停計息")
+                        need_notify = True
 
             final_status = "\n".join(status_msgs)
-
             target_email = row.get('Email', '')
             mat_date_str = row['MaturityDate'].strftime('%Y-%m-%d') if pd.notna(row['MaturityDate']) else "-"
             
-            # 📧 HTML Email 內容組裝
             email_subject = f"【ELN通知】{row['ID']} - {line_status_short}" if line_status_short else f"【ELN週報】{row['ID']} 狀態報告"
-            
             email_html_body = f"""
             <html>
             <body>
                 <h3>Hi {row['Name']} 您好，</h3>
                 <p>您的結構型商品 <b>{row['ID']}</b> ({row['Product_Type']}) 最新狀態如下：</p>
-                
                 <h2 style="color: {title_color};">{line_status_short}</h2>
-                
                 <p><b>詳細標的表現：</b></p>
                 <table style="border-collapse: collapse; width: 100%;">
                     <tr style="background-color: #f2f2f2;">
@@ -524,11 +508,10 @@ if uploaded_file is not None:
                     </tr>
                     {asset_rows_html}
                 </table>
-                
                 <br>
                 <p>📅 <b>到期日：</b> {mat_date_str}</p>
                 <hr>
-                <p style="font-size: 12px; color: gray;">此郵件為系統自動發送，請勿直接回覆。</p>
+                <p style="font-size: 12px; color: gray;">此郵件為系統自動發送。</p>
             </body>
             </html>
             """
@@ -550,29 +533,57 @@ if uploaded_file is not None:
             row_res.update(detail_cols)
             results.append(row_res)
 
+        # --- 顯示與操作 ---
         if not results:
             st.warning("⚠️ 無資料")
         else:
             final_df = pd.DataFrame(results)
-            def color_status(val):
-                s = str(val)
-                if "跌破KI" in s or "接股" in s: return 'background-color: #f8d7da; color: red; font-weight: bold'
-                if "EKI觀察中" in s or "暫停" in s: return 'background-color: #fff3cd; color: #856404'
-                if "提前" in s or "獲利" in s or "計息中" in s: return 'background-color: #d4edda; color: green'
-                return ''
+            
+            # 🔥 新增：智能樣式函數
+            def highlight_rows(row):
+                styles = [''] * len(row)
+                status = str(row['狀態'])
+                
+                # 1. 判斷是否為「久遠的 KO」
+                is_old_ko = False
+                if "提前出場" in status:
+                    # 抓日期
+                    match = re.search(r'(\d{4}-\d{2}-\d{2})', status)
+                    if match:
+                        try:
+                            ko_date = datetime.strptime(match.group(1), '%Y-%m-%d')
+                            days_diff = (datetime.now() - ko_date).days
+                            if days_diff > 2:
+                                is_old_ko = True
+                        except: pass
+                
+                # 2. 舊 KO 刪除線樣式
+                if is_old_ko:
+                    return ['text-decoration: line-through; color: #cccccc;'] * len(row)
+                    
+                # 3. 一般樣式 (針對「狀態」欄位)
+                for i, col in enumerate(row.index):
+                    if col == '狀態':
+                        if "跌破KI" in status or "接股" in status:
+                            styles[i] = 'background-color: #f8d7da; color: red; font-weight: bold'
+                        elif "EKI" in status or "暫停" in status:
+                            styles[i] = 'background-color: #fff3cd; color: #856404'
+                        elif "提前" in status or "獲利" in status:
+                            styles[i] = 'background-color: #d4edda; color: green'
+                return styles
 
             t_cols = [c for c in final_df.columns if '_Detail' in c]; t_cols.sort()
             display_cols = ['債券代號', 'Type', 'Name', '狀態', 'KO設定', '最差表現'] + t_cols + ['交易日']
             
             st.subheader("📋 監控列表")
-            st.dataframe(final_df[display_cols].style.applymap(color_status, subset=['狀態']), height=600, use_container_width=True)
+            # 套用整行樣式
+            st.dataframe(final_df[display_cols].style.apply(highlight_rows, axis=1), height=600, use_container_width=True)
 
             st.markdown("### 📧 信件發送操作")
             
             secrets_ok = (SENDER_EMAIL != "" and SENDER_PASSWORD != "")
-
             if not secrets_ok:
-                st.error("⚠️ 未設定 Email 帳號密碼，無法發送信件。請設定 Secrets。")
+                st.error("⚠️ 未設定 Email，無法發送。請至 Secrets 設定。")
             
             if st.session_state['is_sent']:
                 st.success("✅ 發送完成！")
